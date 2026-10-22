@@ -39,7 +39,13 @@ fill empty seats.
   to drop a player). Verified 2026-10-22: join, full game, guest drop → pause → rejoin,
   host drop → takeover + pause → rejoin. Delete TZ* test tables afterwards.
 
+## Deploy
+Live at https://louiebo1.github.io/hearts/ — GitHub Pages from `main` (repo
+Louiebo1/hearts, public), deployed 2026-10-22. To update: commit and `git push`; Pages
+rebuilds in about a minute. GitHub CLI is at `~/bin/gh` (not on PATH), logged in as
+Louiebo1. Verified online play from the live URL in the simulator. Delete test tables
+over REST: anonymous `accounts:signUp` with the apiKey for a token, then
+`DELETE /tables/CODE.json?auth=TOKEN`.
+
 ## Not done yet
-- Deploy (Firebase Hosting needs the firebase CLI → Node, not installed; or any static
-  host such as GitHub Pages).
 - Stage 2 bots; Stage 3 polish.
