@@ -122,3 +122,5 @@ button:disabled { opacity: 0.45; cursor: default; }
   .seat .stack { --w: 26px; }
   .seat .score { font-size: 20px; }
 }
+.dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: #fff5; margin-left: 4px; vertical-align: middle; }
+.dot.on { background: #5ee07a; box-shadow: 0 0 6px #5ee07a; }

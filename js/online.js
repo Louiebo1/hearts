@@ -46,10 +46,10 @@ export class OnlineTable {
   }
 
   /** Starts a new table with me in the first seat. */
-  static async create(name, onUpdate) {
+  static async create(name, onUpdate, wanted = null) {
     const { db, uid, api } = await connect();
     for (let tries = 0; tries < 20; tries++) {
-      const code = newCode();
+      const code = tries === 0 && wanted ? wanted : newCode();
       const ref = api.ref(db, `tables/${code}/meta`);
       const result = await api.runTransaction(ref, (meta) => (meta ? undefined : { hostUid: uid, started: false, created: Date.now() }));
       if (!result.committed) continue;
@@ -120,6 +120,7 @@ export class OnlineTable {
       // Just became host (made the table, or took over): pick up any moves waiting.
       const { db, api } = fb;
       api.get(api.ref(db, `tables/${this.code}/moves`)).then((snap) => snap.forEach((m) => { this.hostMove(m); }));
+      this.checkPause();          // e.g. the old host is the one who's away.
       this.hostStep();
     }
     this.changed();
