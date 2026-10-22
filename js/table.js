@@ -4,7 +4,7 @@
 // the same table can run locally or through Firebase.
 
 import * as G from './game.js';
-import { basicBot } from './bots.js';
+import { RuleBot } from './rules.js';
 import { shuffled } from './cards.js';
 
 export const BOT_NAMES = ['Ruth', 'Walt', 'Fay', 'Mac', 'June', 'Gus', 'Dot', 'Hank', 'Pearl', 'Lou'];
@@ -18,6 +18,8 @@ export function newTableState(seats) {
   return {
     game,
     seats,                        // [{ kind: 'person' | 'bot', name, id? }]
+    // Louie: each computer player passes a heart in 60–90% of hands, drawn per game.
+    heartPassRates: [0, 1, 2, 3].map(() => 0.6 + Math.random() * 0.3),
     continued: [],                // People who tapped Continue after a hand.
     paused: null,                 // { seat, name } while waiting for a dropped player.
     version: 0,
@@ -62,19 +64,31 @@ export const peopleSeats = (state) => state.seats.map((s, i) => (s.kind === 'per
 export function nextHostStep(state) {
   const g = state.game;
   if (state.paused) return null;
+  const started = Date.now();
+  const step = hostStep(state);
+  // The bots' thinking counts toward the pause before their move.
+  if (step) step.delay = Math.max(50, step.delay - (Date.now() - started));
+  return step;
+}
+
+/** The bot playing `seat` (the app's rules, with this game's heart-pass rate). */
+const botFor = (state, seat) => new RuleBot({ heartPassRate: state.heartPassRates?.[seat] ?? 0.75 });
+
+function hostStep(state) {
+  const g = state.game;
   const isBot = (s) => state.seats[s].kind === 'bot';
   switch (g.phase) {
     case 'passing':
       for (let s = 0; s < 4; s++) {
         if (isBot(s) && !G.hasPassed(g, s)) {
-          return { delay: PACE.pass, move: { type: 'pass', seat: s, cards: basicBot.choosePass(G.view(g, s)) } };
+          return { delay: PACE.pass, move: { type: 'pass', seat: s, cards: botFor(state, s).choosePass(G.view(g, s)) } };
         }
       }
       return null;
     case 'playing': {
       const s = G.turn(g);
       if (!isBot(s)) return null;
-      return { delay: PACE.play, move: { type: 'play', seat: s, card: basicBot.choosePlay(G.view(g, s)) } };
+      return { delay: PACE.play, move: { type: 'play', seat: s, card: botFor(state, s).choosePlay(G.view(g, s)) } };
     }
     case 'trickComplete':
       return { delay: PACE.trickLinger, move: { type: 'collect' } };

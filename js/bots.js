@@ -1,6 +1,6 @@
-// Computer players. Stage 1 is the app's Basic strategy: pass the most dangerous cards,
-// duck under the winning card when possible, dump the queen of spades when void.
-// (Stage 2 brings over the app's full rule-based strategy.) Bots see only `view`.
+// The app's Basic strategy: pass the most dangerous cards, duck under the winning card
+// when possible, dump the queen of spades when void. The real opponents are in rules.js;
+// Basic plays your own seat in ?autoplay tests and is the benchmark's yardstick.
 
 import { SPADES, HEARTS, QUEEN_OF_SPADES, suitOf, rankOf } from './cards.js';
 import { winningPlay, ledSuit } from './game.js';

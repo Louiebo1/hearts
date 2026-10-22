@@ -43,6 +43,13 @@ function deal(game, deck) {
   else game.phase = 'passing';
 }
 
+/** A new hand, before passing, with these hands (for the bots' pass look-ahead). */
+export function gameFromHands(hands, handNumber, scores) {
+  const game = { phase: 'passing', handNumber, scores: scores.slice(), handHistory: [] };
+  deal(game, hands.flat());
+  return game;
+}
+
 export function startNextHand(game, deck = shuffled()) {
   if (game.phase !== 'handComplete') throw new HeartsError('wrong phase');
   game.handNumber += 1;

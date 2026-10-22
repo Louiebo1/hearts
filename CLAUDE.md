@@ -10,8 +10,11 @@ fill empty seats.
 - `js/game.js` — the full rules, ported from the iPhone app's `HeartsGame` (pass
   left/right/across/none, 2♣ leads, no points on trick 1, hearts broken, Q♠ 13, moon
   up/down — people choose, bots go down only if up loses, game to 100). Plain JSON state.
-- `js/bots.js` — Stage 1 bot = the app's BasicStrategy. Stage 2: port `RuleStrategy`
-  (Louie's rules, ~2000 lines incl. look-ahead) and benchmark against the app.
+- `js/rules.js` — the opponents: the app's `RuleStrategy` (Louie's rules, `Extras.shipped`
+  only), endgame look-ahead (rule 21) and pass look-ahead (rule 23), ported 2026-10-22.
+  Each bot's heart-pass rate (60–90%) is drawn per game into `state.heartPassRates`.
+  When the app's rules change, port the change here and rerun the parity check.
+- `js/bots.js` — the app's BasicStrategy (your seat in `?autoplay`; benchmark yardstick).
 - `js/table.js` — table state (game + seats + continued + paused), `applyMove`,
   `nextHostStep` (bots and pacing), `LocalHost` (play the computer on this device).
 - `js/online.js` — Firebase Realtime Database + anonymous auth (free Spark plan). Table at
@@ -29,6 +32,13 @@ fill empty seats.
 
 ## Test
 - Engine: `/System/Library/Frameworks/JavaScriptCore.framework/Versions/Current/Helpers/jsc -m tests/engine.test.js`
+- Bots match the app: `swiftc -O -module-name Parity ~/code/hearts/Hearts/Engine/*.swift
+  tests/parity/main.swift -o /tmp/hearts_parity/parity && /tmp/hearts_parity/parity 300 >
+  /tmp/hearts_parity/positions.jsonl`, then `jsc tests/args.js -m tests/parity/parity.js`.
+  2026-10-22: all 190,712 decisions (rules without look-aheads) identical to the app.
+- Bot strength: `jsc tests/args.js -m tests/bench.js -- GAMES CHUNK` (run ~14 at once with
+  different CHUNKs). 2026-10-22: 51.5% ±3.1 vs 3 Basic over 1008 games (app: 54.3% ±3.2).
+  Slowest move ~0.2 s on this Mac.
 - Page: `python3 -m http.server 8765 --bind 127.0.0.1`, then headless Chrome with its own
   profile (`--user-data-dir=<scratch>`; never Louie's) — note headless windows are at least
   500 px wide, so check phone sizes in the iPhone simulator's Safari
@@ -49,4 +59,4 @@ over REST: anonymous `accounts:signUp` with the apiKey for a token, then
 `DELETE /tables/CODE.json?auth=TOKEN`.
 
 ## Not done yet
-- Stage 2 bots; Stage 3 polish.
+- Stage 3 polish.
