@@ -1,6 +1,6 @@
 // Playing with friends through Firebase (the free plan: Realtime Database + anonymous
 // sign-in). A table lives at /tables/CODE:
-//   meta      { hostUid, started, created }
+//   meta      { hostUid, epoch, started, created } — epoch goes up each time the host changes
 //   seats     [ { kind: 'person' | 'bot' | 'open', name, uid, standIn } ] ×4
 //   state     the whole table state as JSON (written only by the host)
 //   moves     moves people send ({ uid, move }); the host applies and deletes them
@@ -8,6 +8,8 @@
 // The host's browser runs the game and the bots. If the host drops, the first other
 // person still connected takes over. A person who drops pauses the game until they're
 // back (same browser = same seat); the host may let a bot play for them meanwhile.
+// The host stamps the state with its epoch, so an old host whose phone wakes up after
+// someone else took over can't write over the game.
 
 import { firebaseConfig } from './firebase-config.js';
 import { applyMove, newTableState, nextHostStep, peopleSeats, BOT_NAMES } from './table.js';
@@ -43,6 +45,8 @@ export class OnlineTable {
     this.unsubs = [];
     this.timer = null;
     this.isHost = false;
+    this.epoch = 0;
+    this.connected = true;
   }
 
   /** Starts a new table with me in the first seat. */
@@ -51,7 +55,7 @@ export class OnlineTable {
     for (let tries = 0; tries < 20; tries++) {
       const code = tries === 0 && wanted ? wanted : newCode();
       const ref = api.ref(db, `tables/${code}/meta`);
-      const result = await api.runTransaction(ref, (meta) => (meta ? undefined : { hostUid: uid, started: false, created: Date.now() }));
+      const result = await api.runTransaction(ref, (meta) => (meta ? undefined : { hostUid: uid, epoch: 1, started: false, created: Date.now() }));
       if (!result.committed) continue;
       const seats = [{ kind: 'person', name, uid }, { kind: 'open' }, { kind: 'open' }, { kind: 'open' }];
       await api.set(api.ref(db, `tables/${code}/seats`), seats);
@@ -96,7 +100,14 @@ export class OnlineTable {
     // My presence: removed by Firebase itself if this browser disconnects.
     const me = api.ref(db, `${base}/presence/${uid}`);
     this.unsubs.push(api.onValue(api.ref(db, '.info/connected'), (snap) => {
-      if (snap.val() === true) { api.onDisconnect(me).remove(); api.set(me, true); }
+      clearTimeout(this.offlineTimer);
+      if (snap.val() === true) {
+        api.onDisconnect(me).remove(); api.set(me, true);
+        if (!this.connected) { this.connected = true; this.changed(); }
+      } else {
+        // Only say so if it lasts (it's briefly false while first connecting).
+        this.offlineTimer = setTimeout(() => { this.connected = false; this.changed(); }, 2500);
+      }
     }));
     this.unsubs.push(api.onValue(api.ref(db, `${base}/meta`), (s) => { this.meta = s.val(); this.roleChanged(); }));
     this.unsubs.push(api.onValue(api.ref(db, `${base}/seats`), (s) => { this.seats = s.val() || []; this.changed(); }));
@@ -116,6 +127,7 @@ export class OnlineTable {
   roleChanged() {
     const wasHost = this.isHost;
     this.isHost = Boolean(this.meta && this.meta.hostUid === fb.uid);
+    if (this.isHost) this.epoch = this.meta.epoch || 1;
     if (this.isHost && !wasHost) {
       // Just became host (made the table, or took over): pick up any moves waiting.
       const { db, api } = fb;
@@ -138,6 +150,7 @@ export class OnlineTable {
         api.runTransaction(api.ref(db, `tables/${this.code}/meta`), (meta) => {
           if (!meta || this.presence[meta.hostUid]) return undefined;
           meta.hostUid = fb.uid;
+          meta.epoch = (meta.epoch || 1) + 1;
           return meta;
         });
       }, 4000);
@@ -164,6 +177,7 @@ export class OnlineTable {
   }
 
   hostMove(snap) {
+    if (!this.isHost) return;
     const { db, api } = fb;
     const { uid, move } = snap.val() || {};
     api.remove(snap.ref);
@@ -176,10 +190,23 @@ export class OnlineTable {
   }
 
   publish() {
+    if (!this.isHost) return;
     const { db, api } = fb;
     this.state.seats = this.seats.map((s) => ({ kind: s.kind === 'person' ? 'person' : 'bot', name: s.name }));
     this.state.game.choosesMoon = this.seats.map((s, i) => (s.kind === 'person' ? i : -1)).filter((i) => i >= 0);
-    api.set(api.ref(db, `tables/${this.code}/state`), JSON.stringify(this.state));
+    this.state.epoch = this.epoch;
+    const json = JSON.stringify(this.state), epoch = this.epoch;
+    api.runTransaction(api.ref(db, `tables/${this.code}/state`), (current) => {
+      try { if (current && JSON.parse(current).epoch > epoch) return undefined; } catch {}
+      return json;
+    }, { applyLocally: false }).then((result) => {
+      if (result.committed || !result.snapshot.val()) return;
+      // A newer host has taken over: stop hosting and follow their game.
+      this.isHost = false;
+      clearTimeout(this.timer);
+      this.state = JSON.parse(result.snapshot.val());
+      this.changed();
+    });
     this.changed();
     this.hostStep();
   }
@@ -194,7 +221,7 @@ export class OnlineTable {
     if (!this.isHost || !this.state) return;
     const step = nextHostStep(this.state);
     if (!step) return;
-    this.timer = setTimeout(() => { if (applyMove(this.state, step.move)) this.publish(); }, step.delay);
+    this.timer = setTimeout(() => { if (this.isHost && applyMove(this.state, step.move)) this.publish(); }, step.delay);
   }
 
   /** The host starts the game: empty seats get bots. */
@@ -233,7 +260,7 @@ export class OnlineTable {
   }
 
   stop() {
-    clearTimeout(this.timer); clearTimeout(this.takeoverTimer);
+    clearTimeout(this.timer); clearTimeout(this.takeoverTimer); clearTimeout(this.offlineTimer);
     this.unsubs.forEach((u) => u());
     const { db, uid, api } = fb;
     api.remove(api.ref(db, `tables/${this.code}/presence/${uid}`));

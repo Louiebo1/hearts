@@ -24,6 +24,7 @@ fill empty seats.
   Realtime Database us-central1, rules from `database.rules.json` published 2026-10-22).
 - `js/main.js` — screens: lobby, friends (start/join), waiting room (code + share link),
   table, score sheet, moon choice, paused, settings (card back, highest-on-left, large print).
+  Remembers the last online table (localStorage `hearts.table`) for "Back to Table".
 - `img/` — felt and card backs from the iPhone apps.
 
 ## Test

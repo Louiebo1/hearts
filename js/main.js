@@ -45,7 +45,16 @@ function backEl(width) {
 
 let host = null;
 let state = null;
-const ui = { mySeat: 0, picked: new Set(), pendingPlay: null, showSheet: false, overlay: null };
+const ui = { mySeat: 0, picked: new Set(), pendingPlay: null, showSheet: false, overlay: null, sentPass: null };
+
+// The online table this browser last sat at, so the start screen can offer to go back.
+const lastTable = {
+  get: () => localStorage.getItem('hearts.table'),
+  set: (code) => localStorage.setItem('hearts.table', code),
+  clear: () => localStorage.removeItem('hearts.table'),
+};
+
+function leaveTable() { lastTable.clear(); showLobby(); }
 
 function showLobby() {
   host?.stop(); host = null; state = null;
@@ -64,6 +73,13 @@ function showLobby() {
   const name = el('div', 'name', `Playing as <button>${settings.name || 'You'}</button>`);
   name.querySelector('button').onclick = () => askName(showLobby);
   lobby.appendChild(name);
+
+  const code = onlineAvailable() && lastTable.get();
+  if (code) {
+    const back = el('button', 'big-button primary', `Back to Table ${code}`);
+    back.onclick = () => withTable(OnlineTable.join(code, settings.name || 'Player', onTableUpdate));
+    lobby.appendChild(back);
+  }
 
   const play = el('button', 'big-button', 'Play the Computer');
   play.onclick = startComputerGame;
@@ -116,7 +132,7 @@ function showFriends() {
   input.onkeydown = (e) => { if (e.key === 'Enter') join.onclick(); };
   row.append(input, join);
   lobby.appendChild(row);
-  lobby.appendChild(el('div', 'note', 'Bots fill any empty seats when the game starts. If someone drops, the game pauses until they\'re back — they just reopen the link.'));
+  lobby.appendChild(el('div', 'note', 'Bots fill any empty seats when the game starts. If someone drops, the game pauses until they\'re back — they reopen the link, or tap Back to Table on the start screen.'));
   const back = el('button', '', 'Back'); back.onclick = showLobby;
   lobby.appendChild(back);
   app.appendChild(lobby);
@@ -126,10 +142,12 @@ async function withTable(promise) {
   app.innerHTML = '<div class="lobby"><div class="tag">Connecting…</div></div>';
   try {
     host = await promise;
+    lastTable.set(host.code);
     history.replaceState(null, '', `${location.pathname}?t=${host.code}`);
     onTableUpdate();
   } catch (e) {
     alert(e.message || String(e));
+    if (/no table|already started|full/i.test(e.message || '')) lastTable.clear();
     showFriends();
   }
 }
@@ -189,7 +207,7 @@ function waitingRoom() {
     const hostSeat = t.seats.find((s) => s.uid === t.meta?.hostUid);
     lobby.appendChild(el('div', 'note', `Waiting for ${hostSeat ? hostSeat.name : 'the host'} to start…`));
   }
-  const leave = el('button', '', 'Leave'); leave.onclick = showLobby;
+  const leave = el('button', '', 'Leave'); leave.onclick = leaveTable;
   lobby.appendChild(leave);
   app.appendChild(lobby);
 }
@@ -198,7 +216,7 @@ function pausedPanel() {
   const p0 = state.paused;
   const o = el('div', 'overlay'), p = el('div', 'panel');
   p.appendChild(el('h2', '', 'Paused'));
-  p.appendChild(el('p', '', `Waiting for <b>${p0.name}</b> to reconnect… They just reopen the link.`));
+  p.appendChild(el('p', '', `Waiting for <b>${p0.name}</b> to reconnect… They reopen the link, or tap Back to Table on the start screen.`));
   if (host instanceof OnlineTable && host.isHost) {
     const buttons = el('div', 'buttons');
     const bot = el('button', '', `Let a bot play for ${p0.name}`);
@@ -218,8 +236,10 @@ function render() {
   if (!state) return;
   const g = state.game;
   const me = ui.mySeat;
+  if (ui.sentPass && (g.phase !== 'passing' || G.hasPassed(g, me) || ui.sentPass.hand !== g.handNumber)) ui.sentPass = null;
   app.innerHTML = '';
   const table = el('div', 'table');
+  if (host instanceof OnlineTable && !host.connected) table.appendChild(el('div', 'banner', 'Connection lost — reconnecting…'));
 
   // Top bar.
   const top = el('div', 'topbar');
@@ -245,7 +265,7 @@ function render() {
     seat.appendChild(el('div', 'name', state.seats[s].name));
     seat.appendChild(el('div', 'score', g.scores[s]));
     seat.appendChild(el('div', 'hp', '+' + g.handPoints[s]));
-    if (g.phase === 'passing' && G.hasPassed(g, s)) seat.appendChild(el('div', 'status pill', 'Passed'));
+    if (g.phase === 'passing' && G.passDirection(g) !== 'none') seat.appendChild(el('div', 'status pill' + (G.hasPassed(g, s) ? '' : ' waiting'), G.hasPassed(g, s) ? 'Passed' : 'Choosing…'));
     middle.appendChild(seat);
   }
   const trick = el('div', 'trick');
@@ -260,10 +280,15 @@ function render() {
   // Status and buttons.
   const controls = el('div', 'controls');
   controls.appendChild(el('div', 'status-line', statusText()));
-  if (g.phase === 'passing' && !G.hasPassed(g, me)) {
+  if (g.phase === 'passing' && !G.hasPassed(g, me) && !ui.sentPass) {
     const b = el('button', 'primary', 'Pass ' + dir);
     b.disabled = ui.picked.size !== 3;
-    b.onclick = () => { host.send({ type: 'pass', seat: me, cards: [...ui.picked] }); ui.picked.clear(); };
+    b.onclick = () => {
+      ui.sentPass = { hand: g.handNumber, cards: [...ui.picked] };
+      ui.picked.clear();
+      render();
+      host.send({ type: 'pass', seat: me, cards: ui.sentPass.cards });
+    };
     controls.appendChild(b);
   }
   if (g.phase === 'playing' && G.turn(g) === me && ui.pendingPlay !== null) {
@@ -293,11 +318,17 @@ function statusText() {
   const g = state.game, me = ui.mySeat;
   switch (g.phase) {
     case 'passing':
-      if (G.hasPassed(g, me)) return 'Waiting for the others to pass…';
+      if (G.hasPassed(g, me) || ui.sentPass) {
+        const waiting = [0, 1, 2, 3].filter((s) => s !== me && !G.hasPassed(g, s)).map((s) => state.seats[s].name);
+        if (!G.hasPassed(g, me)) return 'Passing…';
+        return waiting.length ? `Passed — waiting for ${waiting.join(' & ')}…` : 'Passed';
+      }
       return ui.picked.size < 3 ? `Choose ${3 - ui.picked.size} more card${3 - ui.picked.size === 1 ? '' : 's'} to pass ${G.passDirection(g)}` : 'Ready to pass';
     case 'playing': {
       const t = G.turn(g);
-      if (t !== me) return `${state.seats[t].name}'s turn`;
+      const got = g.completedTricks.length === 0 && g.receivedCards[me].length ? receivedFrom() : '';
+      if (t !== me) return got ? `${got} · ${state.seats[t].name}'s turn` : `${state.seats[t].name}'s turn`;
+      if (got && g.trick.plays.length === 0 && !g.completedTricks.length && ui.pendingPlay === null) return `${got} · You lead the 2♣`;
       if (g.completedTricks.length === 0 && g.trick.plays.length === 0) return 'You lead the 2♣';
       return ui.pendingPlay !== null ? 'Tap it again to play it' : (g.trick.plays.length ? 'Your play' : 'Your lead');
     }
@@ -308,6 +339,13 @@ function statusText() {
     case 'moonChoice': return g.moonShooter === me ? '' : `${state.seats[g.moonShooter].name} shot the moon!`;
     default: return '';
   }
+}
+
+/** "From Mac: Q♠ 9♥ 2♦" — the cards passed to me this hand. */
+function receivedFrom() {
+  const g = state.game, me = ui.mySeat;
+  const from = [0, 1, 2, 3].find((s) => G.passTarget(g, s) === me);
+  return `From ${state.seats[from].name}: ${g.receivedCards[me].map(label).join(' ')}`;
 }
 
 function handRow() {
@@ -322,8 +360,12 @@ function handRow() {
   const natural = cardW + 4;
   const step = hand.length > 1 ? Math.min(natural, (width - cardW) / (hand.length - 1)) : natural;
   row.style.setProperty('--overlap', `${step - cardW}px`);
+  const sent = ui.sentPass ? ui.sentPass.cards : (g.phase === 'passing' && g.pendingPasses[me]) || [];
+  const received = g.phase === 'playing' && g.completedTricks.length === 0 ? g.receivedCards[me] : [];
   for (const c of hand) {
     const e = cardEl(c);
+    if (sent.includes(c)) e.classList.add('sent');
+    if (received.includes(c)) e.classList.add('received');
     if (g.phase === 'passing' && ui.picked.has(c)) e.classList.add('picked');
     if (myTurn && c === ui.pendingPlay) e.classList.add('picked');
     else if (myTurn && legal.has(c)) e.classList.add('playable');
@@ -346,7 +388,7 @@ function measuredCardWidth() {
 
 function tapCard(c) {
   const g = state.game, me = ui.mySeat;
-  if (g.phase === 'passing' && !G.hasPassed(g, me)) {
+  if (g.phase === 'passing' && !G.hasPassed(g, me) && !ui.sentPass) {
     if (ui.picked.has(c)) ui.picked.delete(c);
     else if (ui.picked.size < 3) ui.picked.add(c);
     render();
@@ -394,7 +436,7 @@ function handPanel() {
   const buttons = el('div', 'buttons');
   if (g.phase === 'gameOver') {
     const again = el('button', 'primary', 'Play Again'); again.onclick = () => host.send({ type: 'newGame' }); buttons.appendChild(again);
-    const leave = el('button', '', 'Leave'); leave.onclick = showLobby; buttons.appendChild(leave);
+    const leave = el('button', '', 'Leave'); leave.onclick = leaveTable; buttons.appendChild(leave);
   } else if (state.continued.includes(me)) {
     buttons.appendChild(el('div', 'pill', 'Waiting for the others…'));
   } else {
@@ -436,7 +478,7 @@ function showMenu() {
   const sheet = el('button', '', 'Score Sheet'); sheet.onclick = () => { o.remove(); ui.showSheet = true; render(); };
   const set = el('button', '', 'Settings'); set.onclick = () => { o.remove(); showSettings(render); };
   const newg = el('button', '', 'New Game'); newg.onclick = () => { o.remove(); host.send({ type: 'newGame' }); };
-  const leave = el('button', '', 'Leave'); leave.onclick = () => { o.remove(); showLobby(); };
+  const leave = el('button', '', 'Leave'); leave.onclick = () => { o.remove(); leaveTable(); };
   const close = el('button', 'primary', 'Close'); close.onclick = () => o.remove();
   buttons.append(sheet, set, newg, leave, close);
   p.appendChild(buttons); o.appendChild(p);

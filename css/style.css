@@ -38,6 +38,7 @@ button:disabled { opacity: 0.45; cursor: default; }
   padding: 15px; border-radius: 16px; font-size: 19px; font-weight: 700;
   background: linear-gradient(#b8742f, #8a4f1c); box-shadow: 0 3px 6px #0006;
 }
+.big-button.primary { background: linear-gradient(#3f9a5c, #24703d); }
 .lobby .row { display: flex; gap: 10px; }
 .lobby .row > * { flex: 1; }
 .lobby input {
@@ -103,6 +104,12 @@ button:disabled { opacity: 0.45; cursor: default; }
 .handrow .card.playable { transform: translateY(calc(var(--card-w) * -0.1)); }
 .handrow .card.picked { transform: translateY(calc(var(--card-w) * -0.32)); outline: 3px solid var(--gold); }
 .handrow .card.dim { filter: brightness(0.75); }
+/* Cards I've passed (still in my hand until everyone has passed) and cards passed to me. */
+.handrow .card.sent { transform: translateY(calc(var(--card-w) * -0.32)); filter: brightness(0.6); }
+.handrow .card.received { outline: 3px solid #7fd0ff; }
+.handrow .card.received.playable, .handrow .card.received.dim { outline-color: #7fd0ff; }
+.status.pill.waiting { opacity: 0.6; font-style: italic; }
+.banner { background: #a33; color: #fff; text-align: center; font-weight: 700; padding: 6px; }
 
 /* Overlays */
 .overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.5); display: flex; align-items: center; justify-content: center; z-index: 10; padding: 16px; }
