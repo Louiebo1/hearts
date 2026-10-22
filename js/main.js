@@ -4,6 +4,7 @@
 import * as G from './game.js';
 import { SYMBOL, suitOf, rankLabel, isRed, label, sortHand, QUEEN_OF_SPADES, FULL_DECK, card, HEARTS, SPADES } from './cards.js';
 import { newTableState, LocalHost, BOT_NAMES, peopleSeats, PACE } from './table.js';
+import { OnlineTable, onlineAvailable } from './online.js';
 
 const app = document.getElementById('app');
 
@@ -45,6 +46,7 @@ const ui = { mySeat: 0, picked: new Set(), pendingPlay: null, showSheet: false, 
 
 function showLobby() {
   host?.stop(); host = null; state = null;
+  if (location.search.includes('t=')) history.replaceState(null, '', location.pathname);
   app.innerHTML = '';
   const lobby = el('div', 'lobby');
   lobby.appendChild(el('h1', '', 'Hearts'));
@@ -65,9 +67,10 @@ function showLobby() {
   lobby.appendChild(play);
 
   const friends = el('button', 'big-button', '👥 Play with Friends');
-  friends.disabled = true;
+  friends.disabled = !onlineAvailable();
+  friends.onclick = showFriends;
   lobby.appendChild(friends);
-  lobby.appendChild(el('div', 'note', 'Playing with friends turns on once the free Firebase account is set up.'));
+  if (!onlineAvailable()) lobby.appendChild(el('div', 'note', 'Playing with friends turns on once the free Firebase account is set up.'));
 
   const links = el('div', 'links');
   const set = el('button', '', '⚙︎ Settings'); set.onclick = () => showSettings(showLobby);
@@ -90,6 +93,99 @@ function startComputerGame() {
   ui.mySeat = 0;
   ui.picked.clear(); ui.pendingPlay = null; ui.showSheet = false;
   host = new LocalHost(newTableState(seats), (s) => { state = s; render(); });
+}
+
+// MARK: Playing with friends
+
+function showFriends() {
+  app.innerHTML = '';
+  const lobby = el('div', 'lobby');
+  lobby.appendChild(el('h1', '', 'Hearts'));
+  lobby.appendChild(el('div', 'tag', 'Play with friends'));
+  const start = el('button', 'big-button', '➕ Start a Table');
+  start.onclick = () => withTable(OnlineTable.create(settings.name || 'Player', onTableUpdate));
+  lobby.appendChild(start);
+  lobby.appendChild(el('div', 'note', 'or join with a code'));
+  const row = el('div', 'row');
+  const input = el('input'); input.maxLength = 4; input.placeholder = 'CODE'; input.autocapitalize = 'characters';
+  const join = el('button', 'primary', 'Join');
+  join.onclick = () => input.value.trim().length === 4 && withTable(OnlineTable.join(input.value.trim(), settings.name || 'Player', onTableUpdate));
+  input.onkeydown = (e) => { if (e.key === 'Enter') join.onclick(); };
+  row.append(input, join);
+  lobby.appendChild(row);
+  lobby.appendChild(el('div', 'note', 'Bots fill any empty seats when the game starts. If someone drops, the game pauses until they\'re back — they just reopen the link.'));
+  const back = el('button', '', 'Back'); back.onclick = showLobby;
+  lobby.appendChild(back);
+  app.appendChild(lobby);
+}
+
+async function withTable(promise) {
+  app.innerHTML = '<div class="lobby"><div class="tag">Connecting…</div></div>';
+  try {
+    host = await promise;
+    history.replaceState(null, '', `${location.pathname}?t=${host.code}`);
+    onTableUpdate();
+  } catch (e) {
+    alert(e.message || String(e));
+    showFriends();
+  }
+}
+
+function onTableUpdate() {
+  if (!(host instanceof OnlineTable)) return;
+  ui.mySeat = Math.max(0, host.mySeat);
+  if (host.started && host.state) { state = host.state; render(); } else waitingRoom();
+}
+
+function waitingRoom() {
+  const t = host;
+  state = null;
+  app.innerHTML = '';
+  const lobby = el('div', 'lobby');
+  lobby.appendChild(el('div', 'tag', 'Table code'));
+  lobby.appendChild(el('h1', '', t.code));
+  const link = `${location.origin}${location.pathname}?t=${t.code}`;
+  const share = el('button', 'primary', 'Send the link');
+  share.onclick = async () => {
+    if (navigator.share) { try { await navigator.share({ title: 'Hearts', text: `Join my Hearts table: ${t.code}`, url: link }); } catch {} }
+    else { await navigator.clipboard?.writeText(link); share.textContent = 'Link copied'; }
+  };
+  lobby.appendChild(share);
+  const list = el('div', 'panel');
+  list.style.width = '100%';
+  t.seats.forEach((seat, i) => {
+    const here = seat.kind === 'person' ? (t.presence[seat.uid] ? '🟢' : '⚪️') : '';
+    list.appendChild(el('div', '', seat.kind === 'open' ? `Seat ${i + 1}: <i>open — a bot sits here if nobody joins</i>` : `Seat ${i + 1}: <b>${seat.name}</b> ${here}`));
+  });
+  lobby.appendChild(list);
+  if (t.isHost) {
+    const open = t.seats.filter((s) => s.kind === 'open').length;
+    const go = el('button', 'big-button', open ? `Start — bots take ${open} seat${open === 1 ? '' : 's'}` : 'Start the Game');
+    go.onclick = () => t.start();
+    lobby.appendChild(go);
+  } else {
+    const hostSeat = t.seats.find((s) => s.uid === t.meta?.hostUid);
+    lobby.appendChild(el('div', 'note', `Waiting for ${hostSeat ? hostSeat.name : 'the host'} to start…`));
+  }
+  const leave = el('button', '', 'Leave'); leave.onclick = showLobby;
+  lobby.appendChild(leave);
+  app.appendChild(lobby);
+}
+
+function pausedPanel() {
+  const p0 = state.paused;
+  const o = el('div', 'overlay'), p = el('div', 'panel');
+  p.appendChild(el('h2', '', 'Paused'));
+  p.appendChild(el('p', '', `Waiting for <b>${p0.name}</b> to reconnect… They just reopen the link.`));
+  if (host instanceof OnlineTable && host.isHost) {
+    const buttons = el('div', 'buttons');
+    const bot = el('button', '', `Let a bot play for ${p0.name}`);
+    bot.onclick = () => host.send({ type: 'standIn', away: p0.seat });
+    buttons.appendChild(bot); p.appendChild(buttons);
+    p.appendChild(el('div', 'note', 'They get their seat back as soon as they return.'));
+  }
+  o.appendChild(p);
+  return o;
 }
 
 // MARK: The table
@@ -165,7 +261,8 @@ function render() {
   }
 
   // Overlays.
-  if (g.phase === 'moonChoice' && g.moonShooter === me) app.appendChild(moonPanel());
+  if (state.paused && state.paused.seat !== me) app.appendChild(pausedPanel());
+  else if (g.phase === 'moonChoice' && g.moonShooter === me) app.appendChild(moonPanel());
   else if (g.phase === 'handComplete' || g.phase === 'gameOver') app.appendChild(handPanel());
   else if (ui.showSheet) app.appendChild(sheetPanel());
 }
@@ -350,6 +447,7 @@ window.addEventListener('resize', () => render());
 // For checking the page: ?name=Louie sets the name, ?play starts a game at once.
 const params = new URLSearchParams(location.search);
 if (params.get('name')) { settings.name = params.get('name'); saveSettings(); }
-showLobby();
+if (params.get('t') && onlineAvailable()) withTable(OnlineTable.join(params.get('t'), settings.name || 'Player', onTableUpdate));
+else showLobby();
 if (params.has('fast')) { PACE.play = 30; PACE.trickLinger = 60; PACE.pass = 30; }
 if (params.has('play') || params.has('autoplay')) startComputerGame();
