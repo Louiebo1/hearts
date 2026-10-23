@@ -178,6 +178,8 @@ input:focus { outline: 2px solid var(--gold); }
 .settings input.text { width: 11em; font-size: 16px; padding: 6px 10px; text-align: left; }
 .settings select { font: inherit; padding: 4px 8px; border-radius: 8px; }
 .settings input[type="checkbox"] { width: 20px; height: 20px; accent-color: var(--accent); }
+.overlay.still, .overlay.still .panel { animation: none; }
+.screen { display: contents; }
 @keyframes fade { from { opacity: 0; } }
 @keyframes rise { from { transform: translateY(12px); opacity: 0; } }
 

@@ -117,10 +117,11 @@ const ui = {
   sentPass: null,        // { hand, cards } from tapping Pass until the host has it.
   showSheet: false,
   shown: { key: '', count: 0 },   // Trick cards already drawn (new ones slide in).
+  overlayKey: null,      // The overlay drawn last time (it doesn't fade in again).
 };
 
 function resetUI() {
-  ui.picked.clear(); ui.pendingPlay = null; ui.sentPass = null; ui.showSheet = false; ui.shown = { key: '', count: 0 };
+  ui.picked.clear(); ui.pendingPlay = null; ui.sentPass = null; ui.showSheet = false; ui.shown = { key: '', count: 0 }; ui.overlayKey = null;
 }
 
 function leaveTable() {
@@ -310,8 +311,9 @@ function render() {
   if (ui.sentPass && (g.phase !== 'passing' || G.hasPassed(g, me) || ui.sentPass.hand !== g.handNumber)) ui.sentPass = null;
   if (ui.pendingPlay !== null && !G.legalPlays(g, me).includes(ui.pendingPlay)) ui.pendingPlay = null;
   if (g.phase !== 'passing') ui.picked.clear();
-  const popups = [...app.querySelectorAll('.overlay.popup')];
-  app.innerHTML = '';
+  // The table and its overlays are redrawn in one piece; dialogs opened on top of them
+  // (the menu, settings) are left alone, so they don't flicker as the bots play.
+  const screen = el('div', 'screen');
   const table = el('div', 'table');
   if (host instanceof OnlineTable && !host.connected) table.appendChild(el('div', 'banner', 'Connection lost — reconnecting…'));
 
@@ -365,18 +367,26 @@ function render() {
 
   // My hand.
   table.appendChild(handRow());
-  app.appendChild(table);
+  screen.appendChild(table);
+  const old = app.querySelector(':scope > .screen');
+  if (old) old.replaceWith(screen);
+  else { app.innerHTML = ''; app.appendChild(screen); }
   if (params.has('debug')) {
     document.body.dataset.rects = JSON.stringify([...document.querySelectorAll('.table, .topbar, .middle, .seat, .trick, .controls, .me-line, .handrow, .handrow .card')]
       .map((e) => { const r = e.getBoundingClientRect(); return [e.className, Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height)]; }));
   }
 
-  // Overlays.
-  if (state.paused && state.paused.seat !== me) app.appendChild(pausedPanel());
-  else if (g.phase === 'moonChoice' && g.moonShooter === me) app.appendChild(moonPanel());
-  else if (g.phase === 'handComplete' || g.phase === 'gameOver') app.appendChild(handPanel());
-  else if (ui.showSheet) app.appendChild(sheetPanel());
-  app.append(...popups);
+  // Overlays. The same one as last time doesn't fade in again.
+  let overlay = null, key = null;
+  if (state.paused && state.paused.seat !== me) { overlay = pausedPanel(); key = 'paused'; }
+  else if (g.phase === 'moonChoice' && g.moonShooter === me) { overlay = moonPanel(); key = 'moon'; }
+  else if (g.phase === 'handComplete' || g.phase === 'gameOver') { overlay = handPanel(); key = `hand:${g.handNumber}:${g.phase}`; }
+  else if (ui.showSheet) { overlay = sheetPanel(); key = 'sheet'; }
+  if (overlay) {
+    if (key === ui.overlayKey) overlay.classList.add('still');
+    screen.appendChild(overlay);
+  }
+  ui.overlayKey = key;
 }
 
 /** The cards in the middle. New ones slide in from whoever played them; a finished
