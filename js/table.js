@@ -62,7 +62,6 @@ export const peopleSeats = (state) => state.seats.map((s, i) => (s.kind === 'per
 /** The next thing the host should do on its own (a bot's move, or collecting a finished
  *  trick), with how long to wait first — or null when it's waiting on a person. */
 export function nextHostStep(state) {
-  const g = state.game;
   if (state.paused) return null;
   const started = Date.now();
   const step = hostStep(state);

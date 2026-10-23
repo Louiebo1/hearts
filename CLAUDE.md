@@ -26,12 +26,21 @@ fill empty seats.
 - `js/firebase-config.js` — Louie's project `hearts-659fc` (Spark plan; anonymous auth on;
   Realtime Database us-central1, rules from `database.rules.json` published 2026-10-22).
 - `js/main.js` — screens: lobby, friends (start/join), waiting room (code + share link),
-  table, score sheet, moon choice, paused, settings (card back, highest-on-left, large print).
-  Remembers the last online table (localStorage `hearts.table`) for "Back to Table".
+  table, score sheet, moon choice, paused, settings (name, card back, highest-on-left, large
+  print). In-page dialogs only (no alert/prompt). localStorage: `hearts.settings`,
+  `hearts.table` (last online table → "Back to Table"; kept if you leave mid-game),
+  `hearts.local` (the game vs the computer, saved every move → "Continue Game").
+  Player names come from other browsers: always `esc()` them before they go into HTML.
+  Trick cards slide in from the player and off to the winner (CSS `deal-in`/`sweep`).
+- `css/style.css` — card size fits width AND height (`--card-w`; the trick is 2.9 cards
+  tall, my hand 1.75, ~300px fixed); bigger overlapping cards on upright phones; a one-line
+  player across on phones held sideways.
+- `manifest.webmanifest` — Add to Home Screen opens full screen.
 - `img/` — felt and card backs from the iPhone apps.
 
 ## Test
 - Engine: `/System/Library/Frameworks/JavaScriptCore.framework/Versions/Current/Helpers/jsc -m tests/engine.test.js`
+  (rules, 200 Basic games, 2 whole games of the real bots through the table code; ~20 s).
 - Bots match the app: `swiftc -O -module-name Parity ~/code/hearts/Hearts/Engine/*.swift
   tests/parity/main.swift -o /tmp/hearts_parity/parity && /tmp/hearts_parity/parity 300 >
   /tmp/hearts_parity/positions.jsonl`, then `jsc tests/args.js -m tests/parity/parity.js`.
@@ -44,7 +53,7 @@ fill empty seats.
   500 px wide, so check phone sizes in the iPhone simulator's Safari
   (`xcrun simctl openurl "iPhone 17 Pro" http://127.0.0.1:8765/`).
   URL options: `?name=X`, `?play`, `?autoplay` (bots play every seat, incl. yours online),
-  `?fast`, `?debug`, `?newtable=CODE&startafter=N` (host a table with a set code; start
+  `?fast`, `?debug` (layout rectangles in `body[data-rects]`), `?newtable=CODE&startafter=N` (host a table with a set code; start
   once N people sit). Headless Chrome's snapshot timing breaks Firebase tests — test online
   with two simulators' Safari (iPhone hosts, iPad joins; `simctl terminate … mobilesafari`
   to drop a player). Verified 2026-10-22: join, full game, guest drop → pause → rejoin,
@@ -58,5 +67,11 @@ Louiebo1. Verified online play from the live URL in the simulator. Delete test t
 over REST: anonymous `accounts:signUp` with the apiKey for a token, then
 `DELETE /tables/CODE.json?auth=TOKEN`.
 
+  To click through the page in headless Chrome, load it in a same-origin iframe from a
+  scratch page (symlink js/css/img/index.html next to it) and drive it with script; serve
+  with `Cache-Control: no-store` or Chrome/Safari keep old files.
+  Layout checked 2026-10-22: Mac windows 1280×600 to 1920×1000, iPhone 17 Pro upright and
+  sideways, iPad Pro 11.
+
 ## Not done yet
-- Stage 3 polish.
+- Nothing planned. Ideas: sounds, last-trick peek, a kept history of games.

@@ -4,7 +4,6 @@
 export const CLUBS = 0, DIAMONDS = 1, SPADES = 2, HEARTS = 3;
 export const SUITS = [CLUBS, DIAMONDS, SPADES, HEARTS];
 export const SYMBOL = ['♣', '♦', '♠', '♥'];
-export const SUIT_NAME = ['Clubs', 'Diamonds', 'Spades', 'Hearts'];
 
 export const card = (suit, rank) => suit * 100 + rank;
 export const suitOf = (c) => Math.floor(c / 100);

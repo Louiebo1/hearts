@@ -2,6 +2,7 @@
 import * as G from '../js/game.js';
 import { FULL_DECK, TWO_OF_CLUBS, QUEEN_OF_SPADES, card, HEARTS, CLUBS, SPADES, points } from '../js/cards.js';
 import { basicBot } from '../js/bots.js';
+import { newTableState, applyMove, nextHostStep } from '../js/table.js';
 
 let failures = 0, checks = 0;
 function expect(ok, what) { checks++; if (!ok) { failures++; print('FAIL: ' + what); } }
@@ -53,14 +54,44 @@ for (let n = 0; n < 200; n++) {
   expect(G.shooterGoesDown(0, [10, 20, 20, 20]) === false, 'a bot goes up early on');
 }
 {
-  // No points on the first trick when avoidable; hearts can't lead until broken.
+  // No points on the first trick when avoidable.
   const game = G.newGame();
   game.phase = 'playing';
-  game.hands = [[card(CLUBS, 3), card(HEARTS, 5), QUEEN_OF_SPADES], [card(CLUBS, 4)], [], []];
-  game.trick = { leader: 1, plays: [{ seat: 1, card: card(CLUBS, 2) }] };
-  game.trick.leader = 3; game.trick.plays = [{ seat: 3, card: card(CLUBS, 2) }];
   game.hands[0] = [card(HEARTS, 5), QUEEN_OF_SPADES, card(SPADES, 3)];
+  game.trick = { leader: 3, plays: [{ seat: 3, card: card(CLUBS, 2) }] };
   const legal = G.legalPlays(game, 0);
   expect(legal.length === 1 && legal[0] === card(SPADES, 3), 'no points on the first trick');
+}
+{
+  // Hearts can't lead until broken (unless that's all there is).
+  const game = G.newGame();
+  game.phase = 'playing';
+  game.completedTricks = [{ leader: 0, plays: [], winner: 0 }];
+  game.trick = { leader: 0, plays: [] };
+  game.hands[0] = [card(HEARTS, 5), card(CLUBS, 9)];
+  expect(G.legalPlays(game, 0).join() === String(card(CLUBS, 9)), 'no heart lead before hearts are broken');
+  game.hands[0] = [card(HEARTS, 5), card(HEARTS, 9)];
+  expect(G.legalPlays(game, 0).length === 2, 'hearts lead when nothing else is left');
+}
+
+// Whole games at a table of the real bots, the way the host runs them: every bot move
+// is legal, and the game ends.
+for (let n = 0; n < 2; n++) {
+  const state = newTableState([0, 1, 2, 3].map((i) => ({ kind: 'bot', name: 'Bot' + i })));
+  let steps = 0;
+  while (state.game.phase !== 'gameOver') {
+    const step = nextHostStep(state);
+    if (!step || ++steps > 5000) { expect(false, 'table stuck in ' + state.game.phase); break; }
+    expect(applyMove(state, step.move), 'bot move accepted: ' + JSON.stringify(step.move));
+  }
+  expect(state.heartPassRates.every((r) => r >= 0.6 && r <= 0.9), 'heart-pass rates 60–90%');
+}
+{
+  // People may only pass their own cards, and a wrong move changes nothing.
+  const state = newTableState([{ kind: 'person', name: 'A' }, ...[1, 2, 3].map((i) => ({ kind: 'bot', name: 'B' + i }))]);
+  const before = JSON.stringify(state);
+  expect(!applyMove(state, { type: 'pass', seat: 0, cards: state.game.hands[1].slice(0, 3) }), "can't pass someone else's cards");
+  expect(!applyMove(state, { type: 'play', seat: 0, card: state.game.hands[0][0] }), "can't play while passing");
+  expect(JSON.stringify(state) === before, 'a refused move leaves the table as it was');
 }
 print(`${checks} checks, ${failures} failures`);

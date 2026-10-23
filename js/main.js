@@ -2,28 +2,60 @@
 // state it's given and turns taps into moves.
 
 import * as G from './game.js';
-import { SYMBOL, suitOf, rankLabel, isRed, label, sortHand, QUEEN_OF_SPADES, FULL_DECK, card, HEARTS, SPADES } from './cards.js';
-import { newTableState, LocalHost, BOT_NAMES, peopleSeats, PACE } from './table.js';
+import { SYMBOL, suitOf, rankLabel, isRed, label, sortHand, card, HEARTS, SPADES } from './cards.js';
+import { newTableState, LocalHost, BOT_NAMES, PACE } from './table.js';
 import { OnlineTable, onlineAvailable } from './online.js';
 import { basicBot } from './bots.js';
 
 const app = document.getElementById('app');
 // The page's options as it was opened (the address changes to ?t=CODE once at a table).
-const startParams = new URLSearchParams(location.search);
+// For checking the page: ?name=X, ?play, ?autoplay, ?fast, ?debug, ?newtable=CODE&startafter=N.
+const params = new URLSearchParams(location.search);
 
-// MARK: Settings (remembered on this device)
+// MARK: Remembered on this device
 
-const settings = Object.assign({ name: '', back: 'red', highFirst: true, largePrint: false },
-  JSON.parse(localStorage.getItem('hearts.settings') || '{}'));
+function stored(key, fallback) {
+  try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; }
+}
+function store(key, value) {
+  try { value === null ? localStorage.removeItem(key) : localStorage.setItem(key, JSON.stringify(value)); } catch {}
+}
+
+const settings = Object.assign({ name: '', back: 'red', highFirst: true, largePrint: false }, stored('hearts.settings', {}));
 function saveSettings() {
-  localStorage.setItem('hearts.settings', JSON.stringify(settings));
+  store('hearts.settings', settings);
   document.body.classList.toggle('large-print', settings.largePrint);
 }
 saveSettings();
 
+// The online table this browser last sat at, so the start screen can offer to go back.
+const lastTable = {
+  get: () => stored('hearts.table', null),
+  set: (code) => store('hearts.table', code),
+  clear: () => store('hearts.table', null),
+};
+
+// A game against the computer, saved after every move so a reload doesn't lose it.
+const savedGame = {
+  get: () => { const s = stored('hearts.local', null); return s && s.game && s.game.phase !== 'gameOver' ? s : null; },
+  set: (s) => store('hearts.local', s),
+};
+
+const myName = () => settings.name || 'Player';
+
 // MARK: Helpers
 
+/** Names come from other people's browsers: never let them be read as HTML. */
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+
 const el = (tag, cls, html) => { const e = document.createElement(tag); if (cls) e.className = cls; if (html !== undefined) e.innerHTML = html; return e; };
+
+function button(text, cls, onclick) {
+  const b = el('button', cls);
+  b.textContent = text;
+  b.onclick = onclick;
+  return b;
+}
 
 function cardEl(c) {
   const e = el('div', 'card' + (isRed(c) ? ' red' : ''));
@@ -32,86 +64,140 @@ function cardEl(c) {
   return e;
 }
 
-function backEl(width) {
+function backEl() {
   const e = el('div', 'back');
-  if (width) e.style.setProperty('--w', width);
   const inner = el('div');
   inner.style.backgroundImage = `url(img/back_${settings.back}.jpg)`;
   e.appendChild(inner);
   return e;
 }
 
+/** A dialog over the page. `title` and a string `body` are HTML; Escape or a tap
+ *  outside calls `dismiss`, when there is one. */
+function dialog(title, body, buttons, dismiss) {
+  const o = el('div', 'overlay'), p = el('div', 'panel');
+  if (title) p.appendChild(el('h2', '', title));
+  if (typeof body === 'string') p.appendChild(el('p', '', body));
+  else if (body) p.appendChild(body);
+  if (buttons && buttons.length) { const row = el('div', 'buttons'); row.append(...buttons); p.appendChild(row); }
+  o.appendChild(p);
+  if (dismiss) {
+    o.dataset.dismiss = '';
+    o.dismiss = dismiss;
+    o.onclick = (e) => { if (e.target === o) dismiss(); };
+  }
+  return o;
+}
+
+/** A dialog of its own (the menu, settings, a question) that stays on top while the
+ *  table redraws under it. `buttons` are [text, class, action]; each one closes it. */
+function popup(title, body, buttons, onDismiss) {
+  const o = dialog(title, body, buttons.map(([text, cls, then]) => button(text, cls, () => { o.remove(); then?.(); })),
+    () => { o.remove(); onDismiss?.(); });
+  o.classList.add('popup');
+  app.appendChild(o);
+  return o;
+}
+
+const message = (html, then) => popup('', html, [['OK', 'primary', then]], then);
+const confirmThen = (title, html, yes, onYes) => popup(title, html, [['Cancel', ''], [yes, 'primary', onYes]]);
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') [...document.querySelectorAll('.overlay[data-dismiss]')].pop()?.dismiss();
+});
+
 // MARK: Start screen
 
-let host = null;
-let state = null;
-const ui = { mySeat: 0, picked: new Set(), pendingPlay: null, showSheet: false, overlay: null, sentPass: null };
-
-// The online table this browser last sat at, so the start screen can offer to go back.
-const lastTable = {
-  get: () => localStorage.getItem('hearts.table'),
-  set: (code) => localStorage.setItem('hearts.table', code),
-  clear: () => localStorage.removeItem('hearts.table'),
+let host = null;      // LocalHost or OnlineTable
+let state = null;     // The table state being shown.
+const ui = {
+  mySeat: 0,
+  picked: new Set(),     // Cards chosen to pass.
+  pendingPlay: null,     // A card tapped once (tap again to play).
+  sentPass: null,        // { hand, cards } from tapping Pass until the host has it.
+  showSheet: false,
+  shown: { key: '', count: 0 },   // Trick cards already drawn (new ones slide in).
 };
 
-function leaveTable() { lastTable.clear(); showLobby(); }
+function resetUI() {
+  ui.picked.clear(); ui.pendingPlay = null; ui.sentPass = null; ui.showSheet = false; ui.shown = { key: '', count: 0 };
+}
+
+function leaveTable() {
+  // Mid-game, keep the code: the others wait, and Back to Table brings me back.
+  const midGame = host instanceof OnlineTable && host.started && state && state.game.phase !== 'gameOver';
+  if (host instanceof OnlineTable && !midGame) lastTable.clear();
+  showLobby();
+}
 
 function showLobby() {
   host?.stop(); host = null; state = null;
-  if (location.search.includes('t=')) history.replaceState(null, '', location.pathname);
+  if (location.search) history.replaceState(null, '', location.pathname);
   app.innerHTML = '';
   const lobby = el('div', 'lobby');
   lobby.appendChild(el('h1', '', 'Hearts'));
   lobby.appendChild(el('div', 'tag', 'Shoot the moon · dodge the queen'));
   const fan = el('div', 'fan');
   [card(HEARTS, 14), card(SPADES, 12), card(HEARTS, 13), card(HEARTS, 10), card(HEARTS, 2)].forEach((c, i) => {
-    const e = cardEl(c); e.style.setProperty('--card-w', '58px');
-    e.style.transform = `translateX(-50%) rotate(${(i - 2) * 10}deg)`; fan.appendChild(e);
+    const e = cardEl(c);
+    e.style.transform = `translateX(-50%) rotate(${(i - 2) * 9}deg)`;
+    fan.appendChild(e);
   });
   lobby.appendChild(fan);
 
-  const name = el('div', 'name', `Playing as <button>${settings.name || 'You'}</button>`);
-  name.querySelector('button').onclick = () => askName(showLobby);
+  const name = el('div', 'name', 'Playing as ');
+  name.appendChild(button(settings.name || 'You', 'link', () => askName(showLobby)));
   lobby.appendChild(name);
 
   const code = onlineAvailable() && lastTable.get();
-  if (code) {
-    const back = el('button', 'big-button primary', `Back to Table ${code}`);
-    back.onclick = () => withTable(OnlineTable.join(code, settings.name || 'Player', onTableUpdate));
-    lobby.appendChild(back);
-  }
+  if (code) lobby.appendChild(button(`Back to Table ${code}`, 'big-button primary', () => joinTable(code)));
 
-  const play = el('button', 'big-button', 'Play the Computer');
-  play.onclick = startComputerGame;
-  lobby.appendChild(play);
+  const saved = savedGame.get();
+  if (saved) lobby.appendChild(button(`Continue Game · Hand ${saved.game.handNumber + 1}`, 'big-button primary', () => playComputer(saved)));
+  lobby.appendChild(button(saved ? 'New Game vs the Computer' : 'Play the Computer', 'big-button', () => playComputer()));
 
-  const friends = el('button', 'big-button', 'Play with Friends');
+  const friends = button('Play with Friends', 'big-button', showFriends);
   friends.disabled = !onlineAvailable();
-  friends.onclick = showFriends;
   lobby.appendChild(friends);
-  if (!onlineAvailable()) lobby.appendChild(el('div', 'note', 'Playing with friends turns on once the free Firebase account is set up.'));
 
   const links = el('div', 'links');
-  const set = el('button', '', 'Settings'); set.onclick = () => showSettings(showLobby);
-  links.appendChild(set);
+  links.appendChild(button('Settings', 'link', () => showSettings(showLobby)));
   lobby.appendChild(links);
   app.appendChild(lobby);
   if (!settings.name) askName(showLobby);
 }
 
 function askName(then) {
-  const name = prompt('Your name?', settings.name || '');
-  if (name !== null && name.trim()) { settings.name = name.trim().slice(0, 16); saveSettings(); }
-  then?.();
+  const input = el('input', 'text');
+  input.maxLength = 16; input.value = settings.name; input.placeholder = 'Your name'; input.autocomplete = 'nickname';
+  const save = () => {
+    const name = input.value.trim().slice(0, 16);
+    if (!name) { input.focus(); return; }
+    settings.name = name; saveSettings(); o.remove(); then?.();
+  };
+  input.onkeydown = (e) => { if (e.key === 'Enter') save(); };
+  const o = dialog('Your name?', input, [button('OK', 'primary', save)], settings.name ? () => o.remove() : null);
+  o.classList.add('popup');
+  app.appendChild(o);
+  input.focus();
 }
 
-function startComputerGame() {
-  const names = BOT_NAMES.slice().sort(() => Math.random() - 0.5);
-  const seats = [{ kind: 'person', name: settings.name || 'You' }, ...[0, 1, 2].map((i) => ({ kind: 'bot', name: names[i] }))];
-  if (startParams.has('autoplay')) seats[0].kind = 'bot';     // Testing: bots in every seat.
+function playComputer(saved = null) {
+  let s = saved;
+  if (!s) {
+    const names = BOT_NAMES.slice().sort(() => Math.random() - 0.5);
+    const seats = [{ kind: 'person', name: settings.name || 'You' }, ...[0, 1, 2].map((i) => ({ kind: 'bot', name: names[i] }))];
+    if (params.has('autoplay')) seats[0].kind = 'bot';     // Testing: bots in every seat.
+    s = newTableState(seats);
+  }
   ui.mySeat = 0;
-  ui.picked.clear(); ui.pendingPlay = null; ui.showSheet = false;
-  host = new LocalHost(newTableState(seats), (s) => { state = s; render(); });
+  resetUI();
+  const keep = !params.has('autoplay');
+  host = new LocalHost(s, (next) => {
+    state = next;
+    if (keep) savedGame.set(next.game.phase === 'gameOver' ? null : next);
+    render();
+  });
 }
 
 // MARK: Playing with friends
@@ -121,34 +207,35 @@ function showFriends() {
   const lobby = el('div', 'lobby');
   lobby.appendChild(el('h1', '', 'Hearts'));
   lobby.appendChild(el('div', 'tag', 'Play with friends'));
-  const start = el('button', 'big-button', 'Start a Table');
-  start.onclick = () => withTable(OnlineTable.create(settings.name || 'Player', onTableUpdate));
-  lobby.appendChild(start);
+  lobby.appendChild(button('Start a Table', 'big-button primary', () => withTable(OnlineTable.create(myName(), onTableUpdate))));
   lobby.appendChild(el('div', 'note', 'or join with a code'));
   const row = el('div', 'row');
-  const input = el('input'); input.maxLength = 4; input.placeholder = 'CODE'; input.autocapitalize = 'characters';
-  const join = el('button', 'primary', 'Join');
-  join.onclick = () => input.value.trim().length === 4 && withTable(OnlineTable.join(input.value.trim(), settings.name || 'Player', onTableUpdate));
+  const input = el('input', 'code');
+  input.maxLength = 4; input.placeholder = 'CODE'; input.autocapitalize = 'characters'; input.autocomplete = 'off'; input.spellcheck = false;
+  const join = button('Join', 'primary', () => { if (input.value.trim().length === 4) joinTable(input.value.trim()); else input.focus(); });
   input.onkeydown = (e) => { if (e.key === 'Enter') join.onclick(); };
   row.append(input, join);
   lobby.appendChild(row);
-  lobby.appendChild(el('div', 'note', 'Bots fill any empty seats when the game starts. If someone drops, the game pauses until they\'re back — they reopen the link, or tap Back to Table on the start screen.'));
-  const back = el('button', '', 'Back'); back.onclick = showLobby;
-  lobby.appendChild(back);
+  lobby.appendChild(el('div', 'note', 'Bots fill any empty seats when the game starts. If someone drops, the game waits until they’re back — they reopen the link, or tap Back to Table on the start screen.'));
+  lobby.appendChild(button('Back', '', showLobby));
   app.appendChild(lobby);
 }
 
+const joinTable = (code) => withTable(OnlineTable.join(code, myName(), onTableUpdate));
+
 async function withTable(promise) {
   app.innerHTML = '<div class="lobby"><div class="tag">Connecting…</div></div>';
+  resetUI();
   try {
     host = await promise;
     lastTable.set(host.code);
     history.replaceState(null, '', `${location.pathname}?t=${host.code}`);
     onTableUpdate();
   } catch (e) {
-    alert(e.message || String(e));
-    if (/no table|already started|full/i.test(e.message || '')) lastTable.clear();
+    const text = (e && e.message) || String(e);
+    if (/no table|already started|full/i.test(text)) lastTable.clear();
     showFriends();
+    message(esc(text));
   }
 }
 
@@ -162,7 +249,7 @@ function onTableUpdate() {
 // ?startafter=N (host) starts the table once N people are seated.
 let autoTimer = null;
 function testAutoplay() {
-  if (!startParams.has('autoplay') || !state) return;
+  if (!params.has('autoplay') || !state) return;
   clearTimeout(autoTimer);
   autoTimer = setTimeout(() => {
     const g = state.game, me = ui.mySeat;
@@ -177,66 +264,53 @@ function testAutoplay() {
 
 function waitingRoom() {
   const t = host;
-  const want = Number(startParams.get('startafter') || 0);
+  const want = Number(params.get('startafter') || 0);
   if (want && t.isHost && t.seats.filter((x) => x.kind === 'person').length >= want) { t.start(); return; }
   state = null;
   app.innerHTML = '';
   const lobby = el('div', 'lobby');
   lobby.appendChild(el('div', 'tag', 'Table code'));
-  lobby.appendChild(el('h1', '', t.code));
+  lobby.appendChild(el('h1', 'table-code', t.code));
   const link = `${location.origin}${location.pathname}?t=${t.code}`;
-  const share = el('button', 'primary', 'Send the link');
-  share.onclick = async () => {
-    if (navigator.share) { try { await navigator.share({ title: 'Hearts', text: `Join my Hearts table: ${t.code}`, url: link }); } catch {} }
-    else { await navigator.clipboard?.writeText(link); share.textContent = 'Link copied'; }
-  };
+  const share = button('Send the Link', 'primary', async () => {
+    if (navigator.share) { try { await navigator.share({ title: 'Hearts', text: `Join my Hearts table: ${t.code}`, url: link }); } catch {} return; }
+    try { await navigator.clipboard.writeText(link); share.textContent = 'Link Copied'; } catch { share.textContent = link; }
+  });
   lobby.appendChild(share);
-  const list = el('div', 'panel');
-  list.style.width = '100%';
+  const list = el('div', 'seats-list');
   t.seats.forEach((seat, i) => {
-    const here = seat.kind === 'person' ? `<span class="dot ${t.presence[seat.uid] ? 'on' : ''}"></span>` : '';
-    list.appendChild(el('div', '', seat.kind === 'open' ? `Seat ${i + 1}: <i>open — a bot sits here if nobody joins</i>` : `Seat ${i + 1}: <b>${seat.name}</b> ${here}`));
+    const row = el('div', 'seat-row');
+    if (seat.kind === 'open') row.innerHTML = `<span class="n">${i + 1}</span><i>Open — a bot sits here if nobody joins</i>`;
+    else row.innerHTML = `<span class="n">${i + 1}</span><b>${esc(seat.name)}</b>${seat.uid === t.uid ? '<span class="you">you</span>' : ''}<span class="dot ${t.presence[seat.uid] ? 'on' : ''}"></span>`;
+    list.appendChild(row);
   });
   lobby.appendChild(list);
   if (t.isHost) {
     const open = t.seats.filter((s) => s.kind === 'open').length;
-    const go = el('button', 'big-button', open ? `Start — bots take ${open} seat${open === 1 ? '' : 's'}` : 'Start the Game');
-    go.onclick = () => t.start();
-    lobby.appendChild(go);
+    lobby.appendChild(button(open ? `Start — bots take ${open} seat${open === 1 ? '' : 's'}` : 'Start the Game', 'big-button primary', () => t.start()));
   } else {
     const hostSeat = t.seats.find((s) => s.uid === t.meta?.hostUid);
-    lobby.appendChild(el('div', 'note', `Waiting for ${hostSeat ? hostSeat.name : 'the host'} to start…`));
+    lobby.appendChild(el('div', 'note', `Waiting for ${hostSeat ? esc(hostSeat.name) : 'the host'} to start…`));
   }
-  const leave = el('button', '', 'Leave'); leave.onclick = leaveTable;
-  lobby.appendChild(leave);
+  lobby.appendChild(button('Leave', '', leaveTable));
   app.appendChild(lobby);
-}
-
-function pausedPanel() {
-  const p0 = state.paused;
-  const o = el('div', 'overlay'), p = el('div', 'panel');
-  p.appendChild(el('h2', '', 'Paused'));
-  p.appendChild(el('p', '', `Waiting for <b>${p0.name}</b> to reconnect… They reopen the link, or tap Back to Table on the start screen.`));
-  if (host instanceof OnlineTable && host.isHost) {
-    const buttons = el('div', 'buttons');
-    const bot = el('button', '', `Let a bot play for ${p0.name}`);
-    bot.onclick = () => host.send({ type: 'standIn', away: p0.seat });
-    buttons.appendChild(bot); p.appendChild(buttons);
-    p.appendChild(el('div', 'note', 'They get their seat back as soon as they return.'));
-  }
-  o.appendChild(p);
-  return o;
 }
 
 // MARK: The table
 
 const seatAt = (offset) => (ui.mySeat + offset) % 4;     // 0 me (bottom), 1 left, 2 top, 3 right.
+const offsetOf = (seat) => (seat - ui.mySeat + 4) % 4;
+const nameOf = (seat) => esc(state.seats[seat].name);
+const handPointsText = (seat) => (state.game.handPoints[seat] ? `+${state.game.handPoints[seat]}` : '');
 
 function render() {
   if (!state) return;
   const g = state.game;
   const me = ui.mySeat;
   if (ui.sentPass && (g.phase !== 'passing' || G.hasPassed(g, me) || ui.sentPass.hand !== g.handNumber)) ui.sentPass = null;
+  if (ui.pendingPlay !== null && !G.legalPlays(g, me).includes(ui.pendingPlay)) ui.pendingPlay = null;
+  if (g.phase !== 'passing') ui.picked.clear();
+  const popups = [...app.querySelectorAll('.overlay.popup')];
   app.innerHTML = '';
   const table = el('div', 'table');
   if (host instanceof OnlineTable && !host.connected) table.appendChild(el('div', 'banner', 'Connection lost — reconnecting…'));
@@ -244,67 +318,57 @@ function render() {
   // Top bar.
   const top = el('div', 'topbar');
   const dir = G.passDirection(g);
-  top.appendChild(el('div', '', `<div class="hand">Hand ${g.handNumber + 1}</div><div class="sub">${dir === 'none' ? 'No pass' : 'Pass ' + dir}</div>`));
-  const menu = el('button', '', '•••'); menu.setAttribute('aria-label', 'Menu');
-  menu.onclick = showMenu;
+  top.appendChild(el('div', '', `<div class="hand">Hand ${g.handNumber + 1}</div><div class="sub">${dir === 'none' ? 'No pass' : 'Pass ' + dir}${g.heartsBroken ? ' · Hearts broken' : ''}</div>`));
+  const menu = button('•••', 'menu', showMenu);
+  menu.setAttribute('aria-label', 'Menu');
   top.appendChild(menu);
   table.appendChild(top);
 
   // The other three players and the trick.
   const middle = el('div', 'middle');
   const positions = [null, 'west', 'north', 'east'];
+  const winner = g.phase === 'trickComplete' ? G.winningPlay(g.trick).seat : null;
   for (const offset of [2, 1, 3]) {
     const s = seatAt(offset);
-    const seat = el('div', 'seat ' + positions[offset] + (G.turn(g) === s ? ' turn' : ''));
+    const seat = el('div', `seat ${positions[offset]}${G.turn(g) === s ? ' turn' : ''}`);
     const stack = el('div', 'stack');
-    const count = Math.min(g.hands[s].length, 3);
-    for (let i = 0; i < count; i++) {
-      const b = backEl(); b.style.left = `${i * 6}px`; b.style.top = `${-i * 3 + 6}px`; stack.appendChild(b);
-    }
+    for (let i = 0; i < Math.min(g.hands[s].length, 3); i++) stack.appendChild(backEl());
     seat.appendChild(stack);
-    seat.appendChild(el('div', 'name', state.seats[s].name));
-    seat.appendChild(el('div', 'score', g.scores[s]));
-    seat.appendChild(el('div', 'hp', '+' + g.handPoints[s]));
-    if (g.phase === 'passing' && G.passDirection(g) !== 'none') seat.appendChild(el('div', 'status pill' + (G.hasPassed(g, s) ? '' : ' waiting'), G.hasPassed(g, s) ? 'Passed' : 'Choosing…'));
+    seat.appendChild(el('div', 'plate', `<div class="name">${nameOf(s)}</div><div class="score">${g.scores[s]}</div><div class="hp">${handPointsText(s)}</div>`));
+    if (g.phase === 'passing' && dir !== 'none') seat.appendChild(el('div', 'status pill' + (G.hasPassed(g, s) ? '' : ' waiting'), G.hasPassed(g, s) ? 'Passed' : 'Choosing…'));
+    const uid = host instanceof OnlineTable && state.seats[s].kind === 'person' && host.seats[s]?.uid;
+    if (uid && !host.presence[uid]) seat.appendChild(el('div', 'status pill away', 'Away'));
     middle.appendChild(seat);
   }
-  const trick = el('div', 'trick');
-  const plays = g.phase === 'playing' || g.phase === 'trickComplete' ? g.trick.plays : [];
-  for (const p of plays) {
-    const offset = (p.seat - me + 4) % 4;
-    const c = cardEl(p.card); c.classList.add('p' + offset); trick.appendChild(c);
-  }
-  middle.appendChild(trick);
+  middle.appendChild(trickEl(winner));
   table.appendChild(middle);
 
   // Status and buttons.
   const controls = el('div', 'controls');
   controls.appendChild(el('div', 'status-line', statusText()));
   if (g.phase === 'passing' && !G.hasPassed(g, me) && !ui.sentPass) {
-    const b = el('button', 'primary', 'Pass ' + dir);
-    b.disabled = ui.picked.size !== 3;
-    b.onclick = () => {
+    const b = button('Pass ' + dir, 'primary', () => {
       ui.sentPass = { hand: g.handNumber, cards: [...ui.picked] };
       ui.picked.clear();
       render();
       host.send({ type: 'pass', seat: me, cards: ui.sentPass.cards });
-    };
+    });
+    b.disabled = ui.picked.size !== 3;
     controls.appendChild(b);
   }
   if (g.phase === 'playing' && G.turn(g) === me && ui.pendingPlay !== null) {
-    const b = el('button', 'primary', 'Play ' + label(ui.pendingPlay));
-    b.onclick = () => playPicked();
-    controls.appendChild(b);
+    controls.appendChild(button('Play ' + label(ui.pendingPlay), 'primary', playPicked));
   }
   table.appendChild(controls);
-  table.appendChild(el('div', 'me-line', `<span class="pill">${state.seats[me].name} &nbsp; <b>${g.scores[me]}</b> &nbsp; +${g.handPoints[me]}</span>`));
+  table.appendChild(el('div', 'me-line' + (G.turn(g) === me ? ' turn' : ''),
+    `<span class="pill">${nameOf(me)} <b>${g.scores[me]}</b> <span class="hp">${handPointsText(me)}</span></span>`));
 
   // My hand.
   table.appendChild(handRow());
   app.appendChild(table);
-  if (new URLSearchParams(location.search).has('debug')) {
-    document.body.dataset.rects = JSON.stringify([...document.querySelectorAll('.table, .topbar, .controls, .me-line, .handrow, .handrow .card, .middle')]
-      .map((e) => [e.className, Math.round(e.getBoundingClientRect().x), Math.round(e.getBoundingClientRect().width), Math.round(e.getBoundingClientRect().height)]));
+  if (params.has('debug')) {
+    document.body.dataset.rects = JSON.stringify([...document.querySelectorAll('.table, .topbar, .middle, .seat, .trick, .controls, .me-line, .handrow, .handrow .card')]
+      .map((e) => { const r = e.getBoundingClientRect(); return [e.className, Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height)]; }));
   }
 
   // Overlays.
@@ -312,31 +376,64 @@ function render() {
   else if (g.phase === 'moonChoice' && g.moonShooter === me) app.appendChild(moonPanel());
   else if (g.phase === 'handComplete' || g.phase === 'gameOver') app.appendChild(handPanel());
   else if (ui.showSheet) app.appendChild(sheetPanel());
+  app.append(...popups);
+}
+
+/** The cards in the middle. New ones slide in from whoever played them; a finished
+ *  trick slides off to its winner. */
+function trickEl(winner) {
+  const g = state.game;
+  const trick = el('div', 'trick');
+  const plays = g.phase === 'playing' || g.phase === 'trickComplete' ? g.trick.plays : [];
+  const key = `${g.handNumber}:${g.completedTricks.length}`;
+  const seen = ui.shown.key === key ? ui.shown.count : 0;
+  plays.forEach((p, i) => {
+    const c = cardEl(p.card);
+    c.classList.add('p' + offsetOf(p.seat));
+    if (i >= seen) c.classList.add('enter');
+    if (p.seat === winner) c.classList.add('winner');
+    trick.appendChild(c);
+  });
+  ui.shown = { key, count: plays.length };
+  // While choosing, point at the player the cards go to.
+  const to = G.passTarget(g, ui.mySeat);
+  if (g.phase === 'passing' && to !== null && !G.hasPassed(g, ui.mySeat) && !ui.sentPass) {
+    const arrow = ['', '←', '↑', '→'][offsetOf(to)];
+    trick.appendChild(el('div', 'pass-hint', offsetOf(to) === 3 ? `Passing to ${nameOf(to)} ${arrow}` : `${arrow} Passing to ${nameOf(to)}`));
+  }
+  if (winner !== null && !params.has('fast')) trick.classList.add('collect', 'to-' + offsetOf(winner));
+  return trick;
 }
 
 function statusText() {
   const g = state.game, me = ui.mySeat;
   switch (g.phase) {
-    case 'passing':
+    case 'passing': {
       if (G.hasPassed(g, me) || ui.sentPass) {
-        const waiting = [0, 1, 2, 3].filter((s) => s !== me && !G.hasPassed(g, s)).map((s) => state.seats[s].name);
         if (!G.hasPassed(g, me)) return 'Passing…';
+        const waiting = [0, 1, 2, 3].filter((s) => s !== me && !G.hasPassed(g, s)).map(nameOf);
         return waiting.length ? `Passed — waiting for ${waiting.join(' & ')}…` : 'Passed';
       }
-      return ui.picked.size < 3 ? `Choose ${3 - ui.picked.size} more card${3 - ui.picked.size === 1 ? '' : 's'} to pass ${G.passDirection(g)}` : 'Ready to pass';
+      const left = 3 - ui.picked.size;
+      return left ? `Choose ${left} card${left === 1 ? '' : 's'} to pass ${G.passDirection(g)}` : 'Ready to pass';
+    }
     case 'playing': {
       const t = G.turn(g);
-      const got = g.completedTricks.length === 0 && g.receivedCards[me].length ? receivedFrom() : '';
-      if (t !== me) return got ? `${got} · ${state.seats[t].name}'s turn` : `${state.seats[t].name}'s turn`;
-      if (got && g.trick.plays.length === 0 && !g.completedTricks.length && ui.pendingPlay === null) return `${got} · You lead the 2♣`;
-      if (g.completedTricks.length === 0 && g.trick.plays.length === 0) return 'You lead the 2♣';
-      return ui.pendingPlay !== null ? 'Tap it again to play it' : (g.trick.plays.length ? 'Your play' : 'Your lead');
+      let text;
+      if (t !== me) text = `${nameOf(t)}’s turn`;
+      else if (ui.pendingPlay !== null) text = 'Tap it again to play it';
+      else if (g.completedTricks.length === 0 && g.trick.plays.length === 0) text = 'You lead the 2♣';
+      else text = g.trick.plays.length ? 'Your play' : 'Your lead';
+      const got = g.completedTricks.length === 0 && g.receivedCards[me].length;
+      return got ? `<span class="got">${receivedFrom()}</span> ${text}` : text;
     }
     case 'trickComplete': {
       const w = G.winningPlay(g.trick).seat;
-      return w === me ? 'You take the trick' : `${state.seats[w].name} takes the trick`;
+      const pts = G.trickPoints(g.trick);
+      const what = pts ? ` (${pts} point${pts === 1 ? '' : 's'})` : '';
+      return w === me ? `You take the trick${what}` : `${nameOf(w)} takes the trick${what}`;
     }
-    case 'moonChoice': return g.moonShooter === me ? '' : `${state.seats[g.moonShooter].name} shot the moon!`;
+    case 'moonChoice': return g.moonShooter === me ? '' : `${nameOf(g.moonShooter)} shot the moon!`;
     default: return '';
   }
 }
@@ -345,7 +442,7 @@ function statusText() {
 function receivedFrom() {
   const g = state.game, me = ui.mySeat;
   const from = [0, 1, 2, 3].find((s) => G.passTarget(g, s) === me);
-  return `From ${state.seats[from].name}: ${g.receivedCards[me].map(label).join(' ')}`;
+  return `From ${nameOf(from)}: ${g.receivedCards[me].map(label).join(' ')}`;
 }
 
 function handRow() {
@@ -354,9 +451,10 @@ function handRow() {
   const hand = sortHand(g.hands[me], settings.highFirst);
   const legal = new Set(G.legalPlays(g, me));
   const myTurn = g.phase === 'playing' && G.turn(g) === me;
+  const choosing = g.phase === 'passing' && !G.hasPassed(g, me) && !ui.sentPass;
   // Overlap the cards just enough to fit the screen.
   const cardW = measuredCardWidth();
-  const width = Math.min(window.innerWidth - 24, 1000);
+  const width = Math.min(document.documentElement.clientWidth - 24, 1000);
   const natural = cardW + 4;
   const step = hand.length > 1 ? Math.min(natural, (width - cardW) / (hand.length - 1)) : natural;
   row.style.setProperty('--overlap', `${step - cardW}px`);
@@ -366,7 +464,7 @@ function handRow() {
     const e = cardEl(c);
     if (sent.includes(c)) e.classList.add('sent');
     if (received.includes(c)) e.classList.add('received');
-    if (g.phase === 'passing' && ui.picked.has(c)) e.classList.add('picked');
+    if (choosing) e.classList.add(ui.picked.has(c) ? 'picked' : 'choosable');
     if (myTurn && c === ui.pendingPlay) e.classList.add('picked');
     else if (myTurn && legal.has(c)) e.classList.add('playable');
     else if (myTurn) e.classList.add('dim');
@@ -388,6 +486,7 @@ function measuredCardWidth() {
 
 function tapCard(c) {
   const g = state.game, me = ui.mySeat;
+  if (state.paused) return;
   if (g.phase === 'passing' && !G.hasPassed(g, me) && !ui.sentPass) {
     if (ui.picked.has(c)) ui.picked.delete(c);
     else if (ui.picked.size < 3) ui.picked.add(c);
@@ -407,112 +506,118 @@ function playPicked() {
   host.send({ type: 'play', seat: ui.mySeat, card: c });
 }
 
-// MARK: Overlays
+// MARK: Overlays drawn with the table
 
 function scoreTable() {
   const g = state.game;
   const t = el('table');
   const order = [0, 1, 2, 3].map(seatAt);
-  t.appendChild(el('tr', '', '<th>Hand</th>' + order.map((s) => `<th>${state.seats[s].name}</th>`).join('')));
+  t.appendChild(el('tr', '', '<th>Hand</th>' + order.map((s) => `<th>${nameOf(s)}</th>`).join('')));
   g.handHistory.forEach((changes, i) => {
     t.appendChild(el('tr', '', `<td>${i + 1}</td>` + order.map((s) => `<td>${changes[s]}</td>`).join('')));
   });
-  const totals = el('tr', 'total', '<td>Total</td>' + order.map((s) => `<td>${g.scores[s]}</td>`).join(''));
-  t.appendChild(totals);
+  const best = Math.min(...g.scores);
+  t.appendChild(el('tr', 'total', '<td>Total</td>' + order.map((s) => `<td class="${g.scores[s] === best ? 'best' : ''}">${g.scores[s]}</td>`).join('')));
   return t;
 }
 
 function handPanel() {
   const g = state.game, me = ui.mySeat;
-  const o = el('div', 'overlay'), p = el('div', 'panel');
+  let title;
   if (g.phase === 'gameOver') {
     const winners = G.leaders(g);
-    p.appendChild(el('h2', '', winners.includes(me) ? 'You win!' : `${winners.map((s) => state.seats[s].name).join(' & ')} win${winners.length > 1 ? '' : 's'}`));
+    if (winners.includes(me)) title = winners.length > 1 ? 'You tie for the win!' : 'You win!';
+    else title = `${winners.map(nameOf).join(' & ')} win${winners.length > 1 ? '' : 's'}`;
   } else {
     const shooter = g.moonShooter;
-    p.appendChild(el('h2', '', shooter !== null ? `${shooter === me ? 'You' : state.seats[shooter].name} shot the moon!` : `Hand ${g.handNumber + 1}`));
+    title = shooter !== null ? `${shooter === me ? 'You' : nameOf(shooter)} shot the moon!` : `End of Hand ${g.handNumber + 1}`;
   }
-  p.appendChild(scoreTable());
-  const buttons = el('div', 'buttons');
+  const buttons = [];
   if (g.phase === 'gameOver') {
-    const again = el('button', 'primary', 'Play Again'); again.onclick = () => host.send({ type: 'newGame' }); buttons.appendChild(again);
-    const leave = el('button', '', 'Leave'); leave.onclick = leaveTable; buttons.appendChild(leave);
+    buttons.push(button('Play Again', 'primary', () => host.send({ type: 'newGame' })), button('Leave', '', leaveTable));
   } else if (state.continued.includes(me)) {
-    buttons.appendChild(el('div', 'pill', 'Waiting for the others…'));
+    const waiting = [0, 1, 2, 3].filter((s) => state.seats[s].kind === 'person' && !state.continued.includes(s)).map(nameOf);
+    buttons.push(el('div', 'pill', `Waiting for ${waiting.join(' & ') || 'the others'}…`));
   } else {
-    const next = el('button', 'primary', 'Next Hand'); next.onclick = () => host.send({ type: 'continue', seat: me }); buttons.appendChild(next);
+    buttons.push(button('Next Hand', 'primary', () => host.send({ type: 'continue', seat: me })));
   }
-  p.appendChild(buttons);
-  o.appendChild(p);
-  return o;
+  return dialog(title, scoreTable(), buttons);
 }
 
 function moonPanel() {
-  const o = el('div', 'overlay'), p = el('div', 'panel');
-  p.appendChild(el('h2', '', 'You shot the moon!'));
-  p.appendChild(el('p', '', 'Add 26 to everyone else, or take 26 off your own score?'));
-  const buttons = el('div', 'buttons');
-  const up = el('button', 'primary', 'Everyone else +26'); up.onclick = () => host.send({ type: 'moon', seat: ui.mySeat, down: false });
-  const down = el('button', '', 'Me −26'); down.onclick = () => host.send({ type: 'moon', seat: ui.mySeat, down: true });
-  buttons.append(up, down);
-  p.appendChild(buttons);
-  o.appendChild(p);
-  return o;
+  return dialog('You shot the moon!', 'Add 26 to everyone else, or take 26 off your own score?', [
+    button('Everyone Else +26', 'primary', () => host.send({ type: 'moon', seat: ui.mySeat, down: false })),
+    button('Me −26', '', () => host.send({ type: 'moon', seat: ui.mySeat, down: true })),
+  ]);
 }
 
 function sheetPanel() {
-  const o = el('div', 'overlay'), p = el('div', 'panel');
-  p.appendChild(el('h2', '', 'Score Sheet'));
-  p.appendChild(scoreTable());
-  const buttons = el('div', 'buttons');
-  const close = el('button', 'primary', 'Close'); close.onclick = () => { ui.showSheet = false; render(); };
-  buttons.appendChild(close); p.appendChild(buttons); o.appendChild(p);
-  o.onclick = (e) => { if (e.target === o) { ui.showSheet = false; render(); } };
-  return o;
+  const close = () => { ui.showSheet = false; render(); };
+  return dialog('Score Sheet', scoreTable(), [button('Close', 'primary', close)], close);
 }
 
+function pausedPanel() {
+  const away = state.paused;
+  const body = el('div');
+  body.appendChild(el('p', '', `Waiting for <b>${esc(away.name)}</b> to come back… They reopen the link, or tap Back to Table on the start screen.`));
+  const buttons = [];
+  if (host instanceof OnlineTable && host.isHost) {
+    buttons.push(button(`Let a Bot Play for ${away.name}`, 'primary', () => host.send({ type: 'standIn', away: away.seat })));
+    body.appendChild(el('div', 'note', 'They get their seat back as soon as they return.'));
+  }
+  buttons.push(button('Leave', '', leaveTable));
+  return dialog('Paused', body, buttons);
+}
+
+// MARK: Dialogs on top of the table
+
 function showMenu() {
-  const o = el('div', 'overlay'), p = el('div', 'panel');
-  p.appendChild(el('h2', '', 'Menu'));
-  const buttons = el('div', 'buttons');
-  const sheet = el('button', '', 'Score Sheet'); sheet.onclick = () => { o.remove(); ui.showSheet = true; render(); };
-  const set = el('button', '', 'Settings'); set.onclick = () => { o.remove(); showSettings(render); };
-  const newg = el('button', '', 'New Game'); newg.onclick = () => { o.remove(); host.send({ type: 'newGame' }); };
-  const leave = el('button', '', 'Leave'); leave.onclick = () => { o.remove(); leaveTable(); };
-  const close = el('button', 'primary', 'Close'); close.onclick = () => o.remove();
-  buttons.append(sheet, set, newg, leave, close);
-  p.appendChild(buttons); o.appendChild(p);
-  o.onclick = (e) => { if (e.target === o) o.remove(); };
-  app.appendChild(o);
+  const online = host instanceof OnlineTable;
+  popup('Menu', null, [
+    ['Score Sheet', '', () => { ui.showSheet = true; render(); }],
+    ['Settings', '', () => showSettings(render)],
+    ['New Game', '', () => confirmThen('New Game?', online ? 'This starts the game over for everyone at the table.' : 'This game’s scores will be lost.', 'New Game', () => host.send({ type: 'newGame' }))],
+    ['Leave', '', () => {
+      if (online && state.game.phase !== 'gameOver') confirmThen('Leave the Table?', 'The game waits for you (or the host lets a bot play). Come back with Back to Table on the start screen.', 'Leave', leaveTable);
+      else leaveTable();
+    }],
+    ['Close', 'primary'],
+  ]);
 }
 
 function showSettings(after) {
-  const o = el('div', 'overlay'), p = el('div', 'panel');
-  p.appendChild(el('h2', '', 'Settings'));
   const form = el('div', 'settings');
   form.innerHTML = `
+    <label class="name-setting">Your name <input class="text" id="name" maxlength="16" autocomplete="nickname"></label>
     <label>Card back <select id="back">${['red', 'green', 'blue', 'black'].map((c) => `<option value="${c}" ${settings.back === c ? 'selected' : ''}>${c[0].toUpperCase() + c.slice(1)}</option>`).join('')}</select></label>
-    <label>Highest card on left <input type="checkbox" id="high" ${settings.highFirst ? 'checked' : ''}></label>
+    <label>Highest card on the left <input type="checkbox" id="high" ${settings.highFirst ? 'checked' : ''}></label>
     <label>Large card letters <input type="checkbox" id="large" ${settings.largePrint ? 'checked' : ''}></label>`;
-  p.appendChild(form);
-  const buttons = el('div', 'buttons');
-  const done = el('button', 'primary', 'Done');
-  done.onclick = () => {
+  form.querySelector('#name').value = settings.name;
+  // Seated at a table, the name is already taken; change it from the start screen.
+  if (state) form.querySelector('.name-setting').remove();
+  const done = () => {
+    const name = form.querySelector('#name')?.value.trim().slice(0, 16);
+    if (name) settings.name = name;
     settings.back = form.querySelector('#back').value;
     settings.highFirst = form.querySelector('#high').checked;
     settings.largePrint = form.querySelector('#large').checked;
-    saveSettings(); o.remove(); after?.();
+    saveSettings();
+    after?.();
   };
-  buttons.appendChild(done); p.appendChild(buttons); o.appendChild(p);
-  app.appendChild(o);
+  popup('Settings', form, [['Done', 'primary', done]], done);     // Closing any way keeps the changes.
 }
 
-window.addEventListener('resize', () => render());
-// For checking the page: ?name=Louie sets the name, ?play starts a game at once.
-const params = new URLSearchParams(location.search);
-if (params.get('name')) { settings.name = params.get('name'); saveSettings(); }
-if (params.get('newtable') && onlineAvailable()) withTable(OnlineTable.create(settings.name || 'Player', onTableUpdate, params.get('newtable')));
-else if (params.get('t') && onlineAvailable()) withTable(OnlineTable.join(params.get('t'), settings.name || 'Player', onTableUpdate));
-else showLobby();
+// MARK: Start
+
+let resizeFrame = 0;
+window.addEventListener('resize', () => { cancelAnimationFrame(resizeFrame); resizeFrame = requestAnimationFrame(render); });
+
+if (params.get('name')) { settings.name = params.get('name').slice(0, 16); saveSettings(); }
 if (params.has('fast')) { PACE.play = 30; PACE.trickLinger = 60; PACE.pass = 30; }
-if ((params.has('play') || params.has('autoplay')) && !params.get('t') && !params.get('newtable')) startComputerGame();
+const tableCode = params.get('t') || params.get('newtable');
+if (tableCode && onlineAvailable()) {
+  const go = () => (params.get('newtable') ? withTable(OnlineTable.create(myName(), onTableUpdate, tableCode)) : joinTable(tableCode));
+  // Someone opening a shared link for the first time: their name before their seat.
+  if (settings.name) go(); else askName(go);
+} else if (params.has('play') || params.has('autoplay')) playComputer();
+else showLobby();

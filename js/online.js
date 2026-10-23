@@ -178,7 +178,7 @@ export class OnlineTable {
 
   hostMove(snap) {
     if (!this.isHost) return;
-    const { db, api } = fb;
+    const { api } = fb;
     const { uid, move } = snap.val() || {};
     api.remove(snap.ref);
     if (!this.state || !move) return;

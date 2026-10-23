@@ -4,7 +4,7 @@
 
 import { FULL_DECK, TWO_OF_CLUBS, QUEEN_OF_SPADES, HEARTS, suitOf, rankOf, points, shuffled, sortHand } from './cards.js';
 
-export const PLAYERS = 4, TRICKS = 13, TARGET = 100, MOON = 26;
+export const TRICKS = 13, TARGET = 100, MOON = 26;
 export const PASS = ['left', 'right', 'across', 'none'];
 
 export class HeartsError extends Error {}
