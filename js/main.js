@@ -5,6 +5,7 @@ import * as G from './game.js';
 import { SYMBOL, suitOf, rankLabel, isRed, label, sortHand, card, HEARTS, SPADES } from './cards.js';
 import { newTableState, LocalHost, BOT_NAMES, PACE } from './table.js';
 import { OnlineTable, onlineAvailable } from './online.js';
+import { syncGame, pushName, accountPanel, accountLobby } from './account.js';
 import { basicBot } from './bots.js';
 
 const app = document.getElementById('app');
@@ -24,6 +25,7 @@ function store(key, value) {
 const settings = Object.assign({ name: '', back: 'red', highFirst: true, largePrint: false }, stored('hearts.settings', {}));
 function saveSettings() {
   store('hearts.settings', settings);
+  pushName(settings.name);
   document.body.classList.toggle('large-print', settings.largePrint);
 }
 saveSettings();
@@ -149,6 +151,7 @@ function showLobby() {
   const name = el('div', 'name', 'Playing as ');
   name.appendChild(button(settings.name || 'You', 'link', () => askName(showLobby)));
   lobby.appendChild(name);
+  lobby.appendChild(accountLobby());          // Sign in with Google (or who's signed in).
 
   const code = onlineAvailable() && lastTable.get();
   if (code) lobby.appendChild(button(`Back to Table ${code}`, 'big-button primary', () => joinTable(code)));
@@ -614,6 +617,7 @@ function showSettings(after) {
     saveSettings();
     after?.();
   };
+  if (!state) form.appendChild(accountPanel(button));     // Not at a table: it could change who holds the seat.
   popup('Settings', form, [['Done', 'primary', done]], done);     // Closing any way keeps the changes.
 }
 
@@ -622,6 +626,15 @@ function showSettings(after) {
 let resizeFrame = 0;
 window.addEventListener('resize', () => { cancelAnimationFrame(resizeFrame); resizeFrame = requestAnimationFrame(render); });
 
+// Signed in with Google (any of the family games): the name and statistics follow the account.
+syncGame({
+  id: 'hearts',
+  name: () => settings.name,
+  setName: (n) => {
+    settings.name = n; saveSettings();
+    for (const b of document.querySelectorAll('.lobby .name button')) b.textContent = n;
+  },
+});
 if (params.get('name')) { settings.name = params.get('name').slice(0, 16); saveSettings(); }
 if (params.has('fast')) { PACE.play = 30; PACE.trickLinger = 60; PACE.pass = 30; }
 const tableCode = params.get('t') || params.get('newtable');
