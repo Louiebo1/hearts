@@ -27,11 +27,15 @@ fill empty seats.
   Realtime Database us-central1, rules from `database.rules.json` published 2026-10-22).
 - `js/main.js` — screens: lobby, friends (start/join), waiting room (code + share link),
   table, score sheet, moon choice, paused, settings (name, card back, highest-on-left, large
-  print). In-page dialogs only (no alert/prompt). localStorage: `hearts.settings`,
+  print, sounds, Suggest button). Suggest (off by default, as in the other games) asks a
+  default `RuleBot` for my pass or play. In-page dialogs only (no alert/prompt). localStorage: `hearts.settings`,
   `hearts.table` (last online table → "Back to Table"; kept if you leave mid-game),
   `hearts.local` (the game vs the computer, saved every move → "Continue Game").
   Player names come from other browsers: always `esc()` them before they go into HTML.
   Trick cards slide in from the player and off to the winner (CSS `deal-in`/`sweep`).
+- `js/sounds.js` — the app's sounds synthesized in code (snap, deal, pass swish, glass
+  when hearts break, doom for the Q♠, win fanfare), played from `tableSounds()` in main.js
+  by comparing the table with the last one heard.
 - `css/style.css` — card size fits width AND height (`--card-w`; the trick is 2.9 cards
   tall, my hand 1.75, ~300px fixed); bigger overlapping cards on upright phones; a one-line
   player across on phones held sideways.
@@ -74,7 +78,7 @@ over REST: anonymous `accounts:signUp` with the apiKey for a token, then
   sideways, iPad Pro 11.
 
 ## Not done yet
-- Nothing planned. Ideas: sounds, last-trick peek, a kept history of games.
+- Nothing planned. Ideas: last-trick peek, a kept history of games.
 
 ## Google sign-in (2026-10-28)
 `js/account.js` is a copy of `~/code/cardgames-home/shared/account.js` — the same file in
