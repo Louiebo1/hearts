@@ -2,11 +2,13 @@
 // state it's given and turns taps into moves.
 
 import * as G from './game.js';
-import { SYMBOL, suitOf, rankLabel, isRed, label, sortHand, card, HEARTS, SPADES } from './cards.js';
+import { SYMBOL, suitOf, rankLabel, isRed, label, sortHand, card, HEARTS, SPADES, QUEEN_OF_SPADES } from './cards.js';
 import { newTableState, LocalHost, BOT_NAMES, PACE } from './table.js';
 import { OnlineTable, onlineAvailable } from './online.js';
 import { syncGame, pushName, accountPanel, accountLobby } from './account.js';
 import { basicBot } from './bots.js';
+import { RuleBot } from './rules.js';
+import { play as playSound, unlockSound, sound } from './sounds.js';
 
 const app = document.getElementById('app');
 // The page's options as it was opened (the address changes to ?t=CODE once at a table).
@@ -22,11 +24,12 @@ function store(key, value) {
   try { value === null ? localStorage.removeItem(key) : localStorage.setItem(key, JSON.stringify(value)); } catch {}
 }
 
-const settings = Object.assign({ name: '', back: 'red', highFirst: true, largePrint: false }, stored('hearts.settings', {}));
+const settings = Object.assign({ name: '', back: 'red', highFirst: true, largePrint: false, sounds: true, hints: false }, stored('hearts.settings', {}));
 function saveSettings() {
   store('hearts.settings', settings);
   pushName(settings.name);
   document.body.classList.toggle('large-print', settings.largePrint);
+  sound.on = settings.sounds;
 }
 saveSettings();
 
@@ -120,10 +123,55 @@ const ui = {
   showSheet: false,
   shown: { key: '', count: 0 },   // Trick cards already drawn (new ones slide in).
   overlayKey: null,      // The overlay drawn last time (it doesn't fade in again).
+  hint: null,            // { text, key }: the Suggest answer, shown until the table moves on.
+  heard: null,           // The table as it was last time, for its sounds (see tableSounds).
 };
 
 function resetUI() {
   ui.picked.clear(); ui.pendingPlay = null; ui.sentPass = null; ui.showSheet = false; ui.shown = { key: '', count: 0 }; ui.overlayKey = null;
+  ui.hint = null; ui.heard = null;
+}
+
+// MARK: Sounds
+
+/** The table's sounds, as the app: the deal, the pass, a snap for each card — the Q♠
+ *  dooms and the heart that breaks hearts shatters glass — and a fanfare when I win. The
+ *  state changes in place, so what was heard last time is kept as a summary. */
+function tableSounds() {
+  const g = state.game, me = ui.mySeat;
+  const now = { hand: g.handNumber, phase: g.phase, played: g.completedTricks.length * 4 + g.trick.plays.length, broken: g.heartsBroken };
+  const was = ui.heard;
+  ui.heard = now;
+  if (!was) return;
+  if (now.hand !== was.hand || (was.phase === 'gameOver' && now.phase !== 'gameOver')) { playSound('deal'); return; }
+  if (was.phase === 'passing' && now.phase !== 'passing') playSound('pass');
+  if (now.played > was.played && g.trick.plays.length) {
+    const c = g.trick.plays[g.trick.plays.length - 1].card;
+    playSound(c === QUEEN_OF_SPADES ? 'doom' : suitOf(c) === HEARTS && !was.broken ? 'glass' : 'snap');
+  }
+  if (now.phase === 'gameOver' && was.phase !== 'gameOver' && G.leaders(g).includes(me)) playSound('fanfare', 400);
+}
+document.addEventListener('pointerdown', unlockSound, { capture: true });
+
+// MARK: Suggest
+
+/** Where the table is, so a suggestion is dropped once it moves on. */
+const hintKey = (g) => `${g.handNumber}:${g.phase}:${g.completedTricks.length}:${g.trick.plays.length}`;
+
+/** The Suggest button (a setting): what the computer players would do in my seat. */
+function suggest() {
+  const g = state.game, me = ui.mySeat;
+  const bot = new RuleBot();
+  if (g.phase === 'passing' && !G.hasPassed(g, me) && !ui.sentPass) {
+    const cards = bot.choosePass(G.view(g, me));
+    ui.picked = new Set(cards);
+    ui.hint = { text: `Pass ${sortHand(cards, settings.highFirst).map(label).join(' ')}.`, key: hintKey(g) };
+  } else if (g.phase === 'playing' && G.turn(g) === me) {
+    const c = bot.choosePlay(G.view(g, me));
+    ui.pendingPlay = c;
+    ui.hint = { text: `Play the ${label(c)}.`, key: hintKey(g) };
+  }
+  render();
 }
 
 function leaveTable() {
@@ -197,9 +245,11 @@ function playComputer(saved = null) {
   ui.mySeat = 0;
   resetUI();
   const keep = !params.has('autoplay');
+  if (!saved) playSound('deal');
   host = new LocalHost(s, (next) => {
     state = next;
     if (keep) savedGame.set(next.game.phase === 'gameOver' ? null : next);
+    tableSounds();
     render();
   });
 }
@@ -246,7 +296,7 @@ async function withTable(promise) {
 function onTableUpdate() {
   if (!(host instanceof OnlineTable)) return;
   ui.mySeat = Math.max(0, host.mySeat);
-  if (host.started && host.state) { state = host.state; render(); testAutoplay(); } else waitingRoom();
+  if (host.started && host.state) { state = host.state; tableSounds(); render(); testAutoplay(); } else waitingRoom();
 }
 
 // Testing online: ?autoplay makes this browser play its own seat with the basic bot, and
@@ -364,6 +414,12 @@ function render() {
   if (g.phase === 'playing' && G.turn(g) === me && ui.pendingPlay !== null) {
     controls.appendChild(button('Play ' + label(ui.pendingPlay), 'primary', playPicked));
   }
+  const choosingPass = g.phase === 'passing' && !G.hasPassed(g, me) && !ui.sentPass;
+  if (settings.hints && !state.paused && (choosingPass || (g.phase === 'playing' && G.turn(g) === me))) {
+    controls.appendChild(button('💡 Suggest', 'ghost', suggest));
+  }
+  if (ui.hint && ui.hint.key !== hintKey(g)) ui.hint = null;
+  if (ui.hint) controls.appendChild(el('div', 'hint', esc(ui.hint.text)));
   table.appendChild(controls);
   table.appendChild(el('div', 'me-line' + (G.turn(g) === me ? ' turn' : ''),
     `<span class="pill">${nameOf(me)} <b>${g.scores[me]}</b> <span class="hp">${handPointsText(me)}</span></span>`));
@@ -604,7 +660,9 @@ function showSettings(after) {
     <label class="name-setting">Your name <input class="text" id="name" maxlength="16" autocomplete="nickname"></label>
     <label>Card back <select id="back">${['red', 'green', 'blue', 'black'].map((c) => `<option value="${c}" ${settings.back === c ? 'selected' : ''}>${c[0].toUpperCase() + c.slice(1)}</option>`).join('')}</select></label>
     <label>Highest card on the left <input type="checkbox" id="high" ${settings.highFirst ? 'checked' : ''}></label>
-    <label>Large card letters <input type="checkbox" id="large" ${settings.largePrint ? 'checked' : ''}></label>`;
+    <label>Large card letters <input type="checkbox" id="large" ${settings.largePrint ? 'checked' : ''}></label>
+    <label>Sounds <input type="checkbox" id="sounds" ${settings.sounds ? 'checked' : ''}></label>
+    <label>Suggest button (hints) <input type="checkbox" id="hints" ${settings.hints ? 'checked' : ''}></label>`;
   form.querySelector('#name').value = settings.name;
   // Seated at a table, the name is already taken; change it from the start screen.
   if (state) form.querySelector('.name-setting').remove();
@@ -614,6 +672,9 @@ function showSettings(after) {
     settings.back = form.querySelector('#back').value;
     settings.highFirst = form.querySelector('#high').checked;
     settings.largePrint = form.querySelector('#large').checked;
+    settings.sounds = form.querySelector('#sounds').checked;
+    settings.hints = form.querySelector('#hints').checked;
+    if (!settings.hints) ui.hint = null;
     saveSettings();
     after?.();
   };

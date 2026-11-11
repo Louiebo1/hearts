@@ -35,6 +35,7 @@ button:hover:not(:disabled) { filter: brightness(1.15); }
 button:focus-visible { outline: 3px solid var(--gold); outline-offset: 2px; }
 button.primary { background: var(--accent); }
 button.link { background: none; padding: 0; color: #ffd98a; }
+button.ghost { background: rgba(255, 255, 255, 0.14); border: 1px solid #fff5; }
 button:disabled { opacity: 0.45; cursor: default; }
 input.text, input.code {
   font: inherit; color: #fff; border: 0; border-radius: 12px; padding: 10px 12px;
@@ -138,6 +139,7 @@ input:focus { outline: 2px solid var(--gold); }
 @keyframes sweep { to { translate: var(--tx) var(--ty); scale: 0.7; opacity: 0; } }
 
 .controls { grid-row: 4; display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 6px 12px; padding: 6px; min-height: 52px; }
+.controls .hint { flex-basis: 100%; text-align: center; font-size: 14px; opacity: 0.9; }
 .status-line { font-weight: 700; font-size: clamp(15px, 2.2vw, 19px); text-align: center; text-shadow: 0 1px 3px #0008; }
 .status-line .got { display: inline-block; color: var(--blue); margin-right: 8px; }
 .me-line { grid-row: 5; text-align: center; font-weight: 700; }
