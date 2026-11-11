@@ -5,7 +5,7 @@ import * as G from './game.js';
 import { SYMBOL, suitOf, rankLabel, isRed, label, sortHand, card, HEARTS, SPADES, QUEEN_OF_SPADES } from './cards.js';
 import { newTableState, LocalHost, BOT_NAMES, PACE } from './table.js';
 import { OnlineTable, onlineAvailable } from './online.js';
-import { syncGame, pushName, accountPanel, accountLobby } from './account.js';
+import { syncGame, pushName, pushStats, accountPanel, accountLobby, statsNote, account } from './account.js';
 import { basicBot } from './bots.js';
 import { RuleBot } from './rules.js';
 import { HandOrder, makeDraggable, deferWhileDragging } from './handdrag.js';
@@ -46,6 +46,13 @@ const savedGame = {
   get: () => { const s = stored('hearts.local', null); return s && s.game && s.game.phase !== 'gameOver' ? s : null; },
   set: (s) => store('hearts.local', s),
 };
+
+// Statistics (the app's lines), on this device or with the Google sign-in. The best final
+// score is a "best ever" record ({ rank, score }: rank = −score) so the sign-in merge keeps
+// the lowest one.
+const blankLine = () => ({ played: 0, won: 0, lost: 0, hands: 0, cleanHands: 0, points: 0, queens: 0, moons: 0, best: null });
+const stats = stored('hearts.stats', null) || { computer: blankLine(), online: blankLine() };
+const saveStats = () => { store('hearts.stats', stats); pushStats(); };
 
 const myName = () => settings.name || 'Player';
 
@@ -126,11 +133,12 @@ const ui = {
   overlayKey: null,      // The overlay drawn last time (it doesn't fade in again).
   hint: null,            // { text, key }: the Suggest answer, shown until the table moves on.
   heard: null,           // The table as it was last time, for its sounds (see tableSounds).
+  counted: null,         // The hands and game already in the statistics (see tableStats).
 };
 
 function resetUI() {
   ui.picked.clear(); ui.pendingPlay = null; ui.sentPass = null; ui.showSheet = false; ui.shown = { key: '', count: 0 }; ui.overlayKey = null;
-  ui.hint = null; ui.heard = null;
+  ui.hint = null; ui.heard = null; ui.counted = null;
   handOrder.arrange([], null);
 }
 
@@ -154,6 +162,60 @@ function tableSounds() {
   if (now.phase === 'gameOver' && was.phase !== 'gameOver' && G.leaders(g).includes(me)) playSound('fanfare', 400);
 }
 document.addEventListener('pointerdown', unlockSound, { capture: true });
+
+// MARK: Statistics
+
+/** Counts each finished hand and game once. A table joined or picked up partway starts
+ *  counting from what's on it then. */
+function tableStats() {
+  const g = state.game, me = ui.mySeat;
+  const now = { hands: g.handHistory.length, over: g.phase === 'gameOver' };
+  const was = ui.counted;
+  ui.counted = now;
+  if (!was || params.has('autoplay')) return;
+  const line = stats[host instanceof OnlineTable ? 'online' : 'computer'];
+  let changed = false;
+  if (now.hands === was.hands + 1) {
+    const points = g.handPoints[me];
+    line.hands += 1;
+    line.points += points;
+    if (points === 0) line.cleanHands += 1;
+    if (g.completedTricks.some((t) => t.winner === me && t.plays.some((p) => p.card === QUEEN_OF_SPADES))) line.queens += 1;
+    if (g.moonShooter === me) line.moons += 1;
+    changed = true;
+  }
+  if (now.over && !was.over) {
+    const won = G.leaders(g).includes(me), score = g.scores[me];
+    line.played += 1;
+    line[won ? 'won' : 'lost'] += 1;
+    if (!line.best || score < line.best.score) line.best = { rank: -score, score };
+    changed = true;
+  }
+  if (changed) saveStats();
+}
+
+function showStats() {
+  const pct = (part, whole) => (whole ? `${Math.round((100 * part) / whole)}%` : '–');
+  const rows = [
+    ['Games', (l) => l.played], ['Won', (l) => l.won], ['Lost', (l) => l.lost], ['Win rate', (l) => pct(l.won, l.played)],
+    ['Best final score', (l) => (l.best ? l.best.score : '–')], ['Hands', (l) => l.hands],
+    ['Clean hands (no points)', (l) => `${l.cleanHands} (${pct(l.cleanHands, l.hands)})`],
+    ['Points a hand', (l) => (l.hands ? (l.points / l.hands).toFixed(1) : '–')],
+    ['Took the Q♠', (l) => l.queens], ['Shot the moon', (l) => l.moons],
+  ];
+  const t = el('table', 'stats');
+  t.appendChild(el('tr', '', '<th></th><th>vs the Computer</th><th>with Friends</th>'));
+  for (const [name, f] of rows) t.appendChild(el('tr', '', `<td>${name}</td><td>${f(stats.computer)}</td><td>${f(stats.online)}</td>`));
+  const body = el('div');
+  body.appendChild(t);
+  body.appendChild(el('div', 'note', statsNote()));
+  popup('Statistics', body, [
+    ['Reset', '', () => confirmThen('Reset Statistics?', `Every game and hand recorded ${account.signedIn ? 'with your Google sign-in' : 'on this device'} is forgotten.`, 'Reset', () => {
+      stats.computer = blankLine(); stats.online = blankLine(); saveStats();
+    })],
+    ['Done', 'primary'],
+  ]);
+}
 
 // MARK: Suggest
 
@@ -216,6 +278,7 @@ function showLobby() {
 
   const links = el('div', 'links');
   links.appendChild(button('Settings', 'link', () => showSettings(showLobby)));
+  links.appendChild(button('Statistics', 'link', showStats));
   lobby.appendChild(links);
   app.appendChild(lobby);
   if (!settings.name) askName(showLobby);
@@ -252,6 +315,7 @@ function playComputer(saved = null) {
     state = next;
     if (keep) savedGame.set(next.game.phase === 'gameOver' ? null : next);
     tableSounds();
+    tableStats();
     render();
   });
 }
@@ -298,7 +362,7 @@ async function withTable(promise) {
 function onTableUpdate() {
   if (!(host instanceof OnlineTable)) return;
   ui.mySeat = Math.max(0, host.mySeat);
-  if (host.started && host.state) { state = host.state; tableSounds(); render(); testAutoplay(); } else waitingRoom();
+  if (host.started && host.state) { state = host.state; tableSounds(); tableStats(); render(); testAutoplay(); } else waitingRoom();
 }
 
 // Testing online: ?autoplay makes this browser play its own seat with the basic bot, and
@@ -650,6 +714,7 @@ function showMenu() {
   popup('Menu', null, [
     ['Score Sheet', '', () => { ui.showSheet = true; render(); }],
     ['Settings', '', () => showSettings(render)],
+    ['Statistics', '', showStats],
     ['New Game', '', () => confirmThen('New Game?', online ? 'This starts the game over for everyone at the table.' : 'This game’s scores will be lost.', 'New Game', () => host.send({ type: 'newGame' }))],
     ['Leave', '', () => {
       if (online && state.game.phase !== 'gameOver') confirmThen('Leave the Table?', 'The game waits for you (or the host lets a bot play). Come back with Back to Table on the start screen.', 'Leave', leaveTable);
@@ -700,6 +765,8 @@ syncGame({
     settings.name = n; saveSettings();
     for (const b of document.querySelectorAll('.lobby .name button')) b.textContent = n;
   },
+  stats: () => stats,
+  setStats: (s) => { stats.computer = Object.assign(blankLine(), s.computer); stats.online = Object.assign(blankLine(), s.online); store('hearts.stats', stats); },
 });
 if (params.get('name')) { settings.name = params.get('name').slice(0, 16); saveSettings(); }
 if (params.has('fast')) { PACE.play = 30; PACE.trickLinger = 60; PACE.pass = 30; }

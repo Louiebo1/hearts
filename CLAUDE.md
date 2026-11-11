@@ -28,7 +28,10 @@ fill empty seats.
 - `js/main.js` — screens: lobby, friends (start/join), waiting room (code + share link),
   table, score sheet, moon choice, paused, settings (name, card back, highest-on-left, large
   print, sounds, Suggest button). Suggest (off by default, as in the other games) asks a
-  default `RuleBot` for my pass or play. In-page dialogs only (no alert/prompt). localStorage: `hearts.settings`,
+  default `RuleBot` for my pass or play. Statistics (2026-11-11, the app's lines: games,
+  best final score, hands, clean hands, points a hand, Q♠ taken, moons) in `hearts.stats`,
+  vs the computer / with friends, counted by `tableStats()`; `best` is `{ rank: −score,
+  score }` so the sign-in merge (max) keeps the lowest. In-page dialogs only (no alert/prompt). localStorage: `hearts.settings`,
   `hearts.table` (last online table → "Back to Table"; kept if you leave mid-game),
   `hearts.local` (the game vs the computer, saved every move → "Continue Game").
   Player names come from other browsers: always `esc()` them before they go into HTML.
