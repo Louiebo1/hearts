@@ -41,6 +41,9 @@ fill empty seats.
   player across on phones held sideways.
 - `manifest.webmanifest` — Add to Home Screen opens full screen.
 - `img/` — felt and card backs from the iPhone apps.
+- `js/handdrag.js` — drag a card sideways in your hand to move it (as the 500/Pinochle apps);
+  the order lasts for the hand. Same file in every web game; master copy
+  `~/code/cardgames-home/shared/handdrag.js`.
 
 ## Test
 - Engine: `/System/Library/Frameworks/JavaScriptCore.framework/Versions/Current/Helpers/jsc -m tests/engine.test.js`

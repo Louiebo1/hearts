@@ -8,6 +8,7 @@ import { OnlineTable, onlineAvailable } from './online.js';
 import { syncGame, pushName, accountPanel, accountLobby } from './account.js';
 import { basicBot } from './bots.js';
 import { RuleBot } from './rules.js';
+import { HandOrder, makeDraggable, deferWhileDragging } from './handdrag.js';
 import { play as playSound, unlockSound, sound } from './sounds.js';
 
 const app = document.getElementById('app');
@@ -130,6 +131,7 @@ const ui = {
 function resetUI() {
   ui.picked.clear(); ui.pendingPlay = null; ui.sentPass = null; ui.showSheet = false; ui.shown = { key: '', count: 0 }; ui.overlayKey = null;
   ui.hint = null; ui.heard = null;
+  handOrder.arrange([], null);
 }
 
 // MARK: Sounds
@@ -357,8 +359,10 @@ const offsetOf = (seat) => (seat - ui.mySeat + 4) % 4;
 const nameOf = (seat) => esc(state.seats[seat].name);
 const handPointsText = (seat) => (state.game.handPoints[seat] ? `+${state.game.handPoints[seat]}` : '');
 
+const handOrder = new HandOrder();     // Where I've dragged cards in my hand this hand.
+
 function render() {
-  if (!state) return;
+  if (!state || deferWhileDragging(render)) return;
   const g = state.game;
   const me = ui.mySeat;
   if (ui.sentPass && (g.phase !== 'passing' || G.hasPassed(g, me) || ui.sentPass.hand !== g.handNumber)) ui.sentPass = null;
@@ -517,7 +521,7 @@ function receivedFrom() {
 function handRow() {
   const g = state.game, me = ui.mySeat;
   const row = el('div', 'handrow');
-  const hand = sortHand(g.hands[me], settings.highFirst);
+  const hand = handOrder.arrange(sortHand(g.hands[me], settings.highFirst), g.handNumber);
   const legal = new Set(G.legalPlays(g, me));
   const myTurn = g.phase === 'playing' && G.turn(g) === me;
   const choosing = g.phase === 'passing' && !G.hasPassed(g, me) && !ui.sentPass;
@@ -540,6 +544,7 @@ function handRow() {
     e.onclick = () => tapCard(c);
     row.appendChild(e);
   }
+  makeDraggable(hand, [...row.children], (c, to) => { handOrder.move(hand, c, to); render(); });
   return row;
 }
 
